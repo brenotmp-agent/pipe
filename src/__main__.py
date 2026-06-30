@@ -77,6 +77,11 @@ def startup(config: dict):
         log.info("Startup", f"Removendo {repo_id}")
         shutil.rmtree(REPO_DIR / repo_id)
 
+    # Gerar os agentes nativos do kiro-cli (KIRO_HOME isolado)
+    from src.core.agent import generate_native_agents
+    home = generate_native_agents(config)
+    log.info("Startup", f"Agentes nativos gerados em {home / 'agents'}")
+
 
 def board_full_sync(config: dict):
     global board
@@ -281,7 +286,13 @@ def call_agent(config: dict, task: dict | None):
     col = task["column"]
     issue = task["issue"]
 
-    agent_id = col.get("agent", "")
+    from src.core.agent import (AgentParams, build_prompt, kiro_home,
+                                resolve_agent_id, resolve_repo_id,
+                                resolve_work_dir)
+    from src.adapters.kiro_cli_agent import KiroCliAgent
+    from src.core.config import CONTEXTS_DIR
+
+    agent_id = resolve_agent_id(col, issue)
     # Resolver plataforma e config do agente
     agents_cfg = config.get("agents", {})
     platform = None
@@ -296,52 +307,31 @@ def call_agent(config: dict, task: dict | None):
         log.warning("Agent", f"Agente '{agent_id}' não encontrado na config")
         return
 
-    # Resolução de model/effort (precedência: agente < coluna < tag /effort)
+    # Resolução de model (definido na config do agente)
     model = agent_cfg.get("model", "")
-    effort = col.get("effort") or agent_cfg.get("effort")
 
-    if col.get("allow-overwrite", False):
-        tag_effort = _parse_effort_tag(issue.get("body_path", ""))
-        if tag_effort and tag_effort in config.get("effort", {}):
-            effort_map = config["effort"][tag_effort]
-            model = effort_map.get("model", model)
-            effort = tag_effort
-
-    from src.core.agent import AgentParams, build_prompt
-    from src.adapters.kiro_cli_agent import KiroCliAgent
-    from src.core.config import CONTEXTS_DIR
-
-    ctx_file = CONTEXTS_DIR / platform / f"{agent_id}.md"
-    context = ctx_file.read_text(encoding="utf-8") if ctx_file.exists() else None
+    board_cfg = task["board"]
+    repo_id = resolve_repo_id(config, board_cfg)
+    work_dir = resolve_work_dir(config, board_cfg)
 
     prompt = build_prompt(config, task)
 
     params = AgentParams(
         platform=platform,
+        agent_id=agent_id,
         agent_name=agent_cfg.get("name", agent_id),
         model=model,
         issue_id=issue["id"],
         board_id=board_id,
         col_id=col_id,
         prompt=prompt,
-        effort=effort,
-        context=context,
+        work_dir=str(work_dir),
+        kiro_home=str(kiro_home()),
+        repo_id=repo_id,
     )
 
     adapter = KiroCliAgent()
     adapter.execute(params)
-
-
-def _parse_effort_tag(body_path: str) -> str | None:
-    """Extrai valor do comando /effort do bloco @--- da issue."""
-    p = Path(body_path)
-    if not p.exists():
-        return None
-    content = p.read_text(encoding="utf-8")
-    raw_body = content.split("\n", 1)[1] if "\n" in content else ""
-    from src.core.commands import split_body
-    _, cmds = split_body(raw_body)
-    return cmds.effort
 
 
 def sleep_time(config: dict, had_changes: bool, task: dict | None):

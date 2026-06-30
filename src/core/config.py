@@ -66,7 +66,8 @@ def _validate_agents(agents: dict):
         )
 
 
-def _validate_boards(boards: dict):
+def _validate_boards(boards: dict, known_agents: set[str] | None = None):
+    known_agents = known_agents or set()
     _require(boards, "platform", "boards")
     for board_id, board in boards.items():
         if board_id == "platform":
@@ -81,6 +82,28 @@ def _validate_boards(boards: dict):
                     raise ConfigError(
                         f"boards.{board_id}.columns.{col_id}.{ev}: deve ser uma lista"
                     )
+
+            ctx = f"boards.{board_id}.columns.{col_id}"
+
+            # Agente default da coluna deve existir
+            agent = col.get("agent")
+            if agent and known_agents and agent not in known_agents:
+                raise ConfigError(f"{ctx}.agent: agente '{agent}' não definido em 'agents'")
+
+            # override-agent: mapa nível → agente
+            override = col.get("override-agent")
+            if override is not None:
+                if not isinstance(override, dict):
+                    raise ConfigError(f"{ctx}.override-agent: deve ser um mapa <nível>: <agente>")
+                if not col.get("agent"):
+                    raise ConfigError(
+                        f"{ctx}.override-agent: requer um 'agent' default na coluna"
+                    )
+                for level, ov_agent in override.items():
+                    if known_agents and ov_agent not in known_agents:
+                        raise ConfigError(
+                            f"{ctx}.override-agent.{level}: agente '{ov_agent}' não definido em 'agents'"
+                        )
 
 
 def _validate_log(log_cfg: dict):
@@ -120,7 +143,12 @@ def check_config() -> dict:
     agents = _require(config, "agents", "pipe.yml")
     _validate_agents(agents)
     
+    known_agents = {
+        agent_id
+        for platform in agents.values()
+        for agent_id in platform
+    }
     boards = _require(config, "boards", "pipe.yml")
-    _validate_boards(boards)
+    _validate_boards(boards, known_agents)
     
     return config

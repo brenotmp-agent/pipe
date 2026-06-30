@@ -260,7 +260,7 @@ Comandos disponíveis:
 - `/blocked_by #N, #M`    esta issue está bloqueada por N e M (não avança até fecharem)
 - `/blocks #N, #M`        esta issue bloqueia N e M
 - `/labels a, b, c`       define as labels da issue (substitui todas)
-- `/effort low|medium|high`  esforço sugerido
+- `/effort low|medium|high`  nível de dificuldade da issue (planning poker)
 - `/need_human`           marca que precisa de intervenção humana
 - `/close [completed|not_planned]`  fecha a issue
 - `/archive`              arquiva a issue no board
