@@ -1,0 +1,17 @@
+# Runtime
+.pipe/
+logs/
+contexts/
+repo/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Configuração local
+pipe.yml
+
+# Código de referência (versão antiga)
+oldversion/

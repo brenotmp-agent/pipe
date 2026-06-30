@@ -1,0 +1,1 @@
+# Core domain - business logic
