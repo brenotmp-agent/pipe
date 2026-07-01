@@ -22,6 +22,7 @@ class GitHubBoardAdapter(BoardPort):
     # Throttle
     _throttle_value: int = 16
     _throttle_cooldown: datetime = None
+    _throttle_file: str = ".pipe/throttle"
 
     # Offline (sem conexão) - backoff de reconexão
     _offline_value: int = 1
@@ -74,8 +75,10 @@ class GitHubBoardAdapter(BoardPort):
             self._throttle_cooldown = datetime.now() + timedelta(hours=1)
 
         if self._throttle_cooldown < datetime.now():
-            if self._throttle_value > 1:
+            if self._throttle_value > 16:
                 self._throttle_value //= 2
+                self._save_throttle()
+                log.info("GitHub", f"Throttle reduzido para {self._throttle_value}s (cooldown)")
             self._throttle_cooldown = datetime.now() + timedelta(hours=1)
 
         time.sleep(self._throttle_value)
@@ -86,7 +89,28 @@ class GitHubBoardAdapter(BoardPort):
 
         self._throttle_value = min(self._throttle_value * 2, 64)
         self._throttle_cooldown = datetime.now() + timedelta(hours=1)
+        self._save_throttle()
         log.info("GitHub", f"Throttle aumentado para {self._throttle_value}s")
+
+    def _save_throttle(self):
+        """Persiste throttle_value em arquivo para sobreviver a reinícios."""
+        from pathlib import Path
+        f = Path(self._throttle_file)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(str(self._throttle_value), encoding="utf-8")
+
+    def _load_throttle(self):
+        """Carrega throttle_value persistido (se existir)."""
+        from pathlib import Path
+        f = Path(self._throttle_file)
+        if f.exists():
+            try:
+                val = int(f.read_text(encoding="utf-8").strip())
+                if val > self._throttle_value:
+                    self._throttle_value = val
+                    log.info("GitHub", f"Throttle restaurado: {val}s")
+            except (ValueError, OSError):
+                pass
 
     def _extract_retry_after(self, text: str) -> int | None:
         """Extrai retry-after de headers ou mensagem de erro."""
@@ -164,13 +188,16 @@ class GitHubBoardAdapter(BoardPort):
         )
 
         if is_secondary:
-            wait = retry_after if retry_after else 60
+            # Usar o maior entre retry-after e throttle*4 (backoff exponencial)
+            min_wait = self._throttle_value * 4
+            wait = max(retry_after or 0, min_wait, 60)
             back_at = (datetime.now() + timedelta(seconds=wait)).strftime("%H:%M:%S")
             log.warning("GitHub",
-                        f"Secondary rate limit (pontos restantes: {h_remaining or '?'}) "
+                        f"Secondary rate limit (pontos restantes: {h_remaining or '?'}, "
+                        f"throttle: {self._throttle_value}s) "
                         f"- aguardando {wait}s (retorna às {back_at})",
                         wait_seconds=wait, retry_after=retry_after,
-                        remaining=h_remaining)
+                        remaining=h_remaining, throttle=self._throttle_value)
             self._throttle_hit()
             time.sleep(wait)
             return True
@@ -465,7 +492,8 @@ class GitHubBoardAdapter(BoardPort):
         self._repo = list(repos.values())[0] if repos else None
         if self._repo and self._repo.startswith("git@github.com:"):
             self._repo = self._repo.replace("git@github.com:", "").replace(".git", "")
-        log.info("GitHub", f"Repositório: {self._repo}")
+        self._load_throttle()
+        log.info("GitHub", f"Repositório: {self._repo} (throttle: {self._throttle_value}s)")
 
     def sync_boards(self, boards: list[dict]) -> None:
         self._penalty_check()
