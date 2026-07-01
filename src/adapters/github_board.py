@@ -180,8 +180,11 @@ class GitHubBoardAdapter(BoardPort):
         self._offline_value = min(self._offline_value * 2, self._offline_max)
         return True
 
-    def _gh(self, *args) -> str:
-        """Executa comando gh com tratamento de rate limit e falta de conexão."""
+    def _gh(self, *args, stdin: str = None) -> str:
+        """Executa comando gh com tratamento de rate limit e falta de conexão.
+
+        Se stdin for fornecido, envia os dados via stdin do processo (útil para --input -).
+        """
         attempt = 0
         while True:
             attempt += 1
@@ -189,7 +192,8 @@ class GitHubBoardAdapter(BoardPort):
                 log.info("GitHub", f"[{self._throttle_value}s] Tentando novamente (tentativa {attempt})",
                          attempt=attempt, command=args[0] if args else "")
             self._throttle()
-            result = subprocess.run(["gh", *args], capture_output=True, text=True)
+            result = subprocess.run(["gh", *args], capture_output=True, text=True,
+                                    input=stdin)
             output = result.stdout.strip()
             error = result.stderr.strip()
 
@@ -752,17 +756,14 @@ class GitHubBoardAdapter(BoardPort):
         owner, repo = self._repo.split("/")
         log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - labels {labels}",
                  operation="set_labels", board_id=board_id, issue_id=issue_id)
-        # PUT substitui todas as labels; lista vazia remove todas.
+        # PUT substitui todas as labels; usa --input - com JSON para garantir
+        # que a API receba um array válido (inclusive array vazio).
+        payload = json.dumps({"labels": labels or []})
         args = ["api", "-X", "PUT",
                 "-H", "Accept: application/vnd.github+json",
+                "--input", "-",
                 f"/repos/{owner}/{repo}/issues/{issue_id}/labels"]
-        if labels:
-            for name in labels:
-                args += ["-f", f"labels[]={name}"]
-        else:
-            # Corpo explícito com array vazio
-            args += ["-f", "labels="]
-        self._gh(*args)
+        self._gh(*args, stdin=payload)
 
     def add_label(self, board_id: str, issue_id: str, label: str) -> None:
         """Adiciona uma única label (mantém as demais) via POST REST."""

@@ -380,15 +380,26 @@ def main():
     log.info("Pipe", "Esteira agêntica iniciada")
     running = True
     while running:
-        today = datetime.now().date()
-        if today != last_full_sync:
-            board_full_sync(config)
-            last_full_sync = today
+        try:
+            today = datetime.now().date()
+            if today != last_full_sync:
+                board_full_sync(config)
+                last_full_sync = today
 
-        had_changes = sync_board(config)
-        task = keep_task(config)
-        call_agent(config, task)
-        sleep_time(config, had_changes, task)
+            had_changes = sync_board(config)
+            task = keep_task(config)
+            call_agent(config, task)
+            sleep_time(config, had_changes, task)
+        except PenaltyException as e:
+            back_at = (datetime.now() + timedelta(seconds=e.wait_seconds)).strftime('%H:%M:%S')
+            log.warning("Pipe", f"Rate limit - retorna às {back_at}")
+            time.sleep(e.wait_seconds)
+        except KeyboardInterrupt:
+            log.info("Pipe", "Interrompido pelo usuário")
+            running = False
+        except Exception as e:
+            log.error("Pipe", f"Erro no ciclo (não fatal): {e}")
+            time.sleep(config.get("sleep", 60))
 
 
 if __name__ == "__main__":
