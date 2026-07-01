@@ -156,7 +156,11 @@ def board_full_sync(config: dict):
 
 
 def sync_board(config: dict) -> bool:
-    """Sincroniza boards e retorna True se houve qualquer movimentação."""
+    """Sincroniza boards e retorna True se houve qualquer movimentação.
+
+    Penalty dentro do sync não propaga - apenas interrompe o sync do board
+    afetado e prossegue para que tasks já disponíveis possam ser executadas.
+    """
     global board
     queue = ChangeQueue()
     had_changes = False
@@ -165,7 +169,7 @@ def sync_board(config: dict) -> bool:
         try:
             sync_remote(board_id, board, queue)
         except PenaltyException:
-            log.warning("Sync", f"[{board_id}] Penalty no sync remoto - pulando")
+            log.warning("Sync", f"[{board_id}] Penalty no sync remoto - pulando board")
             continue
 
         detect_local_changes(board_id, queue)
@@ -174,7 +178,11 @@ def sync_board(config: dict) -> bool:
         if queue.getNext() is not None:
             had_changes = True
 
-        apply_changes(board_id, board, queue, config)
+        try:
+            apply_changes(board_id, board, queue, config)
+        except PenaltyException:
+            log.warning("Sync", f"[{board_id}] Penalty no apply - saindo do sync")
+            break
 
     return had_changes
 
@@ -392,8 +400,9 @@ def main():
             call_agent(config, task)
             sleep_time(config, had_changes, task)
         except PenaltyException as e:
+            # Penalty escapou do sync (board_full_sync) - não há tasks locais, esperar
             back_at = (datetime.now() + timedelta(seconds=e.wait_seconds)).strftime('%H:%M:%S')
-            log.warning("Pipe", f"Rate limit - retorna às {back_at}")
+            log.warning("Pipe", f"Penalty (pré-sync) - aguardando até {back_at}")
             time.sleep(e.wait_seconds)
         except KeyboardInterrupt:
             log.info("Pipe", "Interrompido pelo usuário")
