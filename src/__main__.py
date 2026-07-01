@@ -4,6 +4,7 @@ from src.core.board import Board, PenaltyException
 from src.core.snapshot import Snapshot
 from src.core.change_queue import ChangeQueue, QUEUE_FILE
 from src.core.sync import sync_remote, detect_local_changes, apply_changes
+from src.core.version import VERSION
 from src.adapters.github_board import GitHubBoardAdapter
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -360,7 +361,7 @@ def main():
     global board
     print(_BANNER)
     log.separator()
-    log.info("Pipe", "Iniciando esteira agêntica")
+    log.info("Pipe", f"Iniciando esteira agêntica v{VERSION}")
 
     config = check_config()
     startup(config)

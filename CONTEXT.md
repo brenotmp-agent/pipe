@@ -2,6 +2,19 @@
 
 Data: 2026-06-28
 
+## Versionamento
+
+A versão do projeto é definida em `src/core/version.py` (variável `VERSION`).
+Segue semântico: `MAJOR.MINOR.PATCH`.
+
+**Regra: toda alteração no código deve incrementar a versão antes do commit.**
+
+- PATCH: correções de bugs, ajustes menores
+- MINOR: funcionalidades novas, melhorias compatíveis
+- MAJOR: mudanças incompatíveis (breaking changes)
+
+A versão é exibida no log ao iniciar a esteira.
+
 ## Visão Geral
 
 Esteira automatizada de agentes de IA com arquitetura hexagonal. Reescrita do projeto `oldversion/` para suportar múltiplas plataformas de board (GitHub Projects, ClickUp, etc) e múltiplos adapters de agente (kiro-cli, etc).
