@@ -99,50 +99,44 @@ class GitHubBoardAdapter(BoardPort):
         """Consulta status do rate limit via GET /rate_limit.
 
         Retorna dict com limit, remaining, reset (epoch), used, resource.
+        Prioriza o recurso que está esgotado (remaining == 0).
         Não conta contra o primary rate limit.
         """
         try:
             result = subprocess.run(
-                ["gh", "api", "-i", "rate_limit"],
+                ["gh", "api", "rate_limit"],
                 capture_output=True, text=True
             )
             if result.returncode != 0:
                 return {}
-            # Parse headers + body
-            output = result.stdout
-            data = {}
-            # Body é JSON após a linha vazia
-            parts = output.split("\r\n\r\n", 1) if "\r\n\r\n" in output else output.split("\n\n", 1)
-            body_str = parts[1] if len(parts) > 1 else parts[0]
-            try:
-                body = json.loads(body_str)
-            except (json.JSONDecodeError, IndexError):
-                return {}
-
+            body = json.loads(result.stdout)
             resources = body.get("resources", {})
-            # Encontrar o recurso mais limitado (remaining mais baixo)
-            worst = None
-            for key in ("core", "graphql", "search"):
-                r = resources.get(key, {})
-                if worst is None or r.get("remaining", 9999) < worst.get("remaining", 9999):
-                    worst = r
-                    worst["resource"] = key
 
-            if worst:
-                data = {
-                    "limit": worst.get("limit", 0),
-                    "remaining": worst.get("remaining", 0),
-                    "used": worst.get("used", 0),
-                    "reset": worst.get("reset", 0),
-                    "resource": worst.get("resource", "core"),
+            # Encontrar o recurso esgotado (remaining == 0)
+            exhausted = None
+            for key in ("core", "graphql", "search", "code_search"):
+                r = resources.get(key, {})
+                if r.get("remaining", 1) == 0:
+                    exhausted = dict(r)
+                    exhausted["resource"] = key
+                    break
+
+            if exhausted:
+                return {
+                    "limit": exhausted.get("limit", 0),
+                    "remaining": 0,
+                    "used": exhausted.get("used", 0),
+                    "reset": exhausted.get("reset", 0),
+                    "resource": exhausted["resource"],
                 }
-            return data
+            return {}
         except Exception:
             return {}
 
-    def _handle_rate_limit(self, output: str, error: str) -> bool:
+    def _handle_rate_limit(self, output: str, error: str, headers: dict = None) -> bool:
         """Detecta e trata rate limit a partir da saída do gh.
 
+        Usa headers da resposta (quando disponíveis) para informações precisas.
         Retorna True se era rate limit (já aguardou; caller deve repetir a chamada),
         False caso contrário.
         """
@@ -150,8 +144,17 @@ class GitHubBoardAdapter(BoardPort):
         if "rate limit" not in combined and "secondary rate limit" not in combined:
             return False
 
+        headers = headers or {}
+
         # Secondary rate limit (tem retry-after no corpo/headers)
         retry_after = self._extract_retry_after(f"{output} {error}")
+        # Também verificar header retry-after
+        if not retry_after and headers.get("retry-after"):
+            try:
+                retry_after = int(headers["retry-after"])
+            except ValueError:
+                pass
+
         if "secondary rate limit" in combined or retry_after:
             wait = retry_after if retry_after else self._throttle_value * 8
             back_at = (datetime.now() + timedelta(seconds=wait)).strftime("%H:%M:%S")
@@ -162,7 +165,29 @@ class GitHubBoardAdapter(BoardPort):
             time.sleep(wait)
             return True
 
-        # Primary rate limit - consultar /rate_limit para obter detalhes
+        # Primary rate limit - usar headers da resposta se disponíveis
+        h_remaining = headers.get("x-ratelimit-remaining")
+        h_reset = headers.get("x-ratelimit-reset")
+        h_limit = headers.get("x-ratelimit-limit")
+        h_used = headers.get("x-ratelimit-used")
+        h_resource = headers.get("x-ratelimit-resource", "core")
+
+        if h_reset:
+            reset_epoch = int(h_reset)
+            wait = max(1, reset_epoch - int(time.time()) + 5)
+            back_at = datetime.fromtimestamp(reset_epoch).strftime("%H:%M:%S")
+            log.warning("GitHub",
+                        f"Primary rate limit ({h_resource}) - "
+                        f"{h_used or '?'}/{h_limit or '?'} usado, "
+                        f"{h_remaining or '0'} restante, "
+                        f"reset às {back_at} (aguardando {wait}s)",
+                        resource=h_resource, limit=h_limit,
+                        remaining=h_remaining, used=h_used,
+                        reset=reset_epoch, wait_seconds=wait)
+            time.sleep(wait)
+            return True
+
+        # Fallback: consultar /rate_limit endpoint
         info = self._get_rate_limit_info()
         if info:
             reset_epoch = info.get("reset", 0)
@@ -171,15 +196,15 @@ class GitHubBoardAdapter(BoardPort):
             log.warning("GitHub",
                         f"Primary rate limit ({info['resource']}) - "
                         f"{info['used']}/{info['limit']} usado, "
-                        f"{info['remaining']} restante, "
+                        f"0 restante, "
                         f"reset às {back_at} (aguardando {wait}s)",
                         resource=info["resource"], limit=info["limit"],
-                        remaining=info["remaining"], used=info["used"],
+                        remaining=0, used=info["used"],
                         reset=reset_epoch, wait_seconds=wait)
             time.sleep(wait)
             return True
 
-        # Fallback (não conseguiu obter info)
+        # Fallback final (não conseguiu obter info de nenhuma fonte)
         wait = 60
         back_at = (datetime.now() + timedelta(seconds=wait)).strftime("%H:%M:%S")
         log.warning("GitHub",
@@ -253,7 +278,7 @@ class GitHubBoardAdapter(BoardPort):
             else:
                 headers = {}
 
-            if self._handle_rate_limit(output, error):
+            if self._handle_rate_limit(output, error, headers):
                 continue
 
             if result.returncode != 0 and self._handle_offline(output, error):
@@ -345,7 +370,7 @@ class GitHubBoardAdapter(BoardPort):
             output, headers = self._split_response(raw_output)
             self._log_rate_limit_headers(headers)
 
-            if self._handle_rate_limit(output, error):
+            if self._handle_rate_limit(output, error, headers):
                 continue
 
             if result.returncode != 0 and self._handle_offline(output, error):
