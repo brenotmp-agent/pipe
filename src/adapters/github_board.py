@@ -146,27 +146,36 @@ class GitHubBoardAdapter(BoardPort):
 
         headers = headers or {}
 
-        # Secondary rate limit (tem retry-after no corpo/headers)
+        # Extrair retry-after de qualquer fonte
         retry_after = self._extract_retry_after(f"{output} {error}")
-        # Também verificar header retry-after
         if not retry_after and headers.get("retry-after"):
             try:
                 retry_after = int(headers["retry-after"])
             except ValueError:
                 pass
 
-        if "secondary rate limit" in combined or retry_after:
-            wait = retry_after if retry_after else self._throttle_value * 8
+        # Determinar se é secondary: mensagem explícita, OU remaining > 0
+        # (se ainda tem pontos mas tomou rate limit, é secondary/abuse)
+        h_remaining = headers.get("x-ratelimit-remaining")
+        is_secondary = (
+            "secondary rate limit" in combined
+            or retry_after is not None
+            or (h_remaining is not None and int(h_remaining) > 0)
+        )
+
+        if is_secondary:
+            wait = retry_after if retry_after else 60
             back_at = (datetime.now() + timedelta(seconds=wait)).strftime("%H:%M:%S")
             log.warning("GitHub",
-                        f"Secondary rate limit - aguardando {wait}s (retorna às {back_at})",
-                        wait_seconds=wait, retry_after=retry_after)
+                        f"Secondary rate limit (pontos restantes: {h_remaining or '?'}) "
+                        f"- aguardando {wait}s (retorna às {back_at})",
+                        wait_seconds=wait, retry_after=retry_after,
+                        remaining=h_remaining)
             self._throttle_hit()
             time.sleep(wait)
             return True
 
-        # Primary rate limit - usar headers da resposta se disponíveis
-        h_remaining = headers.get("x-ratelimit-remaining")
+        # Primary rate limit - usar headers da resposta (remaining == 0)
         h_reset = headers.get("x-ratelimit-reset")
         h_limit = headers.get("x-ratelimit-limit")
         h_used = headers.get("x-ratelimit-used")
@@ -179,10 +188,10 @@ class GitHubBoardAdapter(BoardPort):
             log.warning("GitHub",
                         f"Primary rate limit ({h_resource}) - "
                         f"{h_used or '?'}/{h_limit or '?'} usado, "
-                        f"{h_remaining or '0'} restante, "
+                        f"0 restante, "
                         f"reset às {back_at} (aguardando {wait}s)",
                         resource=h_resource, limit=h_limit,
-                        remaining=h_remaining, used=h_used,
+                        remaining=0, used=h_used,
                         reset=reset_epoch, wait_seconds=wait)
             time.sleep(wait)
             return True
@@ -204,11 +213,11 @@ class GitHubBoardAdapter(BoardPort):
             time.sleep(wait)
             return True
 
-        # Fallback final (não conseguiu obter info de nenhuma fonte)
+        # Fallback final
         wait = 60
         back_at = (datetime.now() + timedelta(seconds=wait)).strftime("%H:%M:%S")
         log.warning("GitHub",
-                    f"Rate limit (sem detalhes disponíveis) - aguardando {wait}s "
+                    f"Rate limit (sem detalhes) - aguardando {wait}s "
                     f"(retorna às {back_at})",
                     wait_seconds=wait, stdout=output[:300], stderr=error[:300])
         time.sleep(60)
