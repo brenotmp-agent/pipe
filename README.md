@@ -93,6 +93,7 @@ src/
 │   ├── commands.py         # Comandos @--- no body (parse/serialize)
 │   ├── change_queue.py     # Fila persistente de sincronismo
 │   ├── snapshot.py         # Snapshot por board
+│   ├── session.py          # Índice de sessões do agente
 │   └── sync.py             # Sincronização local ↔ board
 ├── adapters/               # Implementações
 │   ├── github_board.py     # Adapter para GitHub Projects V2
@@ -100,6 +101,7 @@ src/
 └── __main__.py             # Entrada principal (orquestração)
 
 .pipe/boards/<id>/          # Diretórios de boards e snapshots
+.pipe/sessions.json         # Índice (board/issue/agente) → session_id
 contexts/<platform>/<agent>.md  # Contextos dos agentes
 repo/                       # Repositórios clonados
 logs/                       # Logs diários (JSON) + logs de agente (MD)
@@ -161,6 +163,21 @@ Cada execução gera um arquivo em `logs/<issue_id>/<timestamp>.md` com:
 - **Parâmetros**: plataforma, agente, model, effort, board, coluna, issue
 - **Prompt**: prompt completo enviado ao agente
 - **Chat**: diálogo da execução (preenchido pelo adapter)
+
+### Continuidade de sessão
+
+A esteira mantém a continuidade do raciocínio do agente entre execuções da
+mesma issue. Quando um agente pausa (ex.: `/need_human` ou `/blocked_by`) e a
+tarefa retorna depois, ele retoma de onde parou em vez de recomeçar.
+
+- Índice em `.pipe/sessions.json` mapeia `<board>/<issue>/<agente>` →
+  `session_id` do kiro-cli (chave **por agente**: agentes distintos não herdam
+  a sessão um do outro; o mesmo agente reusado retoma o próprio raciocínio).
+- Antes de executar, se a sessão ainda existir, retoma via `--resume-id`.
+- Após executar, captura o id da sessão (mais recente do cwd) e atualiza o
+  índice.
+- A esteira **não** gerencia o ciclo de vida das sessões do kiro-cli — apenas
+  aponta enquanto existirem. Sessão inexistente vira sessão nova sem erro.
 
 ## Anotações no body (comandos `@---`)
 

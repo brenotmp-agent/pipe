@@ -31,6 +31,7 @@ src/
 │   ├── commands.py     # Comandos @--- no body (IssueCommands, parse/serialize)
 │   ├── change_queue.py # Fila persistente de sincronismo (at-least-once)
 │   ├── snapshot.py     # Snapshot por board
+│   ├── session.py      # Índice de sessões do agente (.pipe/sessions.json)
 │   └── sync.py         # Sincronização local ↔ board (detect + apply)
 ├── adapters/           # Implementações de ports
 │   ├── github_board.py # Adapter para GitHub Projects V2
@@ -211,6 +212,39 @@ O contexto é entregue **concatenado no início do input** do `kiro-cli chat`
 (via `_compose_input`: `contexto + "---" + prompt`), não via `--agent`. A
 execução usa o `~/.kiro` padrão do kiro-cli — não há `KIRO_HOME` isolado nem
 geração de configs de agente nativos.
+
+### Sessão do agente (continuidade entre execuções)
+
+Módulo `src/core/session.py` (`SessionIndex`), índice em `.pipe/sessions.json`.
+
+Objetivo: preservar o raciocínio do agente entre execuções da mesma issue —
+quando um agente pausa (ex.: `need_human`/`blocked_by`) e retoma depois, ele
+continua de onde parou em vez de recomeçar do zero.
+
+- **Chave por agente**: `<board>/<issue>/<agente>`. O mesmo agente atuando em
+  colunas diferentes retoma o próprio raciocínio; agentes distintos nunca
+  herdam a sessão um do outro. O agente da chave é o **resolvido**
+  (`resolve_agent_id`, considera override por `/effort`).
+- **Retomar**: antes de executar, se há `session_id` conhecido e ele **ainda
+  existe** no kiro-cli (`--list-sessions` do cwd), passa `--resume-id <id>`.
+- **Capturar**: após executar, pega o id da sessão mais recente do cwd
+  (topo de `--list-sessions`) e grava no índice. Cobre a primeira execução e o
+  caso de sessão descartada pelo kiro (que vira sessão nova). O loop é
+  sequencial, então a sessão do topo é seguramente a desta execução.
+- **Ciclo de vida**: a esteira **não** gerencia as sessões do kiro-cli (não
+  apaga, não limpa) — apenas aponta enquanto existirem. Se o `--resume-id`
+  referencia uma sessão inexistente, o kiro cria uma nova silenciosamente (sem
+  erro) e o índice é atualizado.
+
+Detalhes técnicos verificados no kiro-cli:
+- Sessões ficam em `~/.kiro/sessions/cli/{uuid}.json/.jsonl`; o índice é um
+  SQLite global (`~/.local/share/kiro-cli/`), **keyed por cwd**. Como cada repo
+  tem seu cwd (`repo/<repo_id>`), `--list-sessions` só enxerga as sessões
+  daquele repo — pipes diferentes não colidem.
+- O `session_id` **não** aparece no stdout headless; só é obtido via
+  `--list-sessions`.
+- `.pipe/sessions.json` sobrevive a reinícios (o `startup` só limpa a fila de
+  mudanças, não o índice de sessões).
 
 ### Log de execução
 
