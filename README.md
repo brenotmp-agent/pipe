@@ -293,6 +293,21 @@ reação em cadeia infinita.
 Toda requisição respeita o throttle, inclusive dentro de loops de
 sincronização.
 
+### Detecção
+
+O rate limit é detectado **apenas por sinais de transporte**, nunca pelo corpo
+da resposta:
+
+- **Status HTTP** `403`/`429` (linha de status capturada via `gh api -i`).
+- **stderr** do `gh` mencionando rate limit.
+- **GraphQL**: resposta `200` com `errors[].type == RATE_LIMITED` (a seção
+  estruturada de erros, não o conteúdo das issues).
+
+O corpo da resposta **não** é escaneado em busca da expressão "rate limit". Se
+fosse, o título/body de uma issue contendo esse texto (ex.: uma issue sobre
+custo de API) provocaria falso-positivo em toda listagem, escalando throttle e
+penalty indevidamente.
+
 ### Throttle
 - Sleep antes de cada chamada (inicia em 16s)
 - Dobra ao receber secondary rate limit (até 64s)

@@ -124,6 +124,37 @@ class GitHubBoardAdapter(BoardPort):
             return int(m.group(1))
         return None
 
+    def _graphql_rate_limited(self, output: str) -> bool:
+        """Detecta rate limit REAL numa resposta GraphQL (HTTP 200 + errors).
+
+        O GitHub sinaliza rate limit no GraphQL com HTTP 200 e um array
+        ``errors`` contendo ``type == "RATE_LIMITED"``. Inspecionamos APENAS
+        essa seção estruturada — nunca o conteúdo de issues (title/body), que
+        pode conter a expressão "rate limit" e causar falso-positivo.
+        """
+        if not output:
+            return False
+        try:
+            data = json.loads(output)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        errors = data.get("errors")
+        if not isinstance(errors, list):
+            return False
+        for err in errors:
+            if not isinstance(err, dict):
+                continue
+            etype = str(err.get("type", "")).upper()
+            if etype in ("RATE_LIMITED", "FORBIDDEN"):
+                return True
+            # Mensagem do próprio erro da API (não do conteúdo da issue).
+            msg = str(err.get("message", "")).lower()
+            if "rate limit" in msg or "was submitted too quickly" in msg:
+                return True
+        return False
+
     def _get_rate_limit_info(self) -> dict:
         """Consulta status do rate limit via GET /rate_limit.
 
@@ -170,31 +201,55 @@ class GitHubBoardAdapter(BoardPort):
     def _handle_rate_limit(self, output: str, error: str, headers: dict = None) -> bool:
         """Detecta e trata rate limit a partir da saída do gh.
 
-        Usa headers da resposta (quando disponíveis) para informações precisas.
-        Retorna True se era rate limit (já aguardou; caller deve repetir a chamada),
-        False caso contrário.
+        IMPORTANTE: a detecção usa SOMENTE sinais de transporte — status HTTP
+        (403/429), stderr do gh e a seção estruturada ``errors`` de uma resposta
+        GraphQL. O corpo da resposta (``output``) NUNCA é escaneado em busca da
+        expressão "rate limit", pois o título/body de uma issue pode conter esse
+        texto e provocar falso-positivo em toda listagem (o que dispararia
+        throttle/penalty indevidos).
+
+        Retorna True se era rate limit (já aguardou; caller deve repetir a
+        chamada), False caso contrário.
         """
-        combined = f"{output} {error}".lower()
-        if "rate limit" not in combined and "secondary rate limit" not in combined:
+        headers = headers or {}
+        status = headers.get("__status__")
+        err_lc = (error or "").lower()
+
+        # Sinais de rate limit (apenas transporte / erro estruturado):
+        #  - HTTP 403 ou 429 na linha de status da resposta
+        #  - stderr do gh menciona rate limit (mensagem da própria CLI/API)
+        #  - resposta GraphQL com errors[].type == RATE_LIMITED/FORBIDDEN
+        status_signal = status in (403, 429)
+        stderr_signal = "rate limit" in err_lc
+        graphql_signal = self._graphql_rate_limited(output)
+
+        if not (status_signal or stderr_signal or graphql_signal):
             return False
 
-        headers = headers or {}
-
-        # Extrair retry-after de qualquer fonte
-        retry_after = self._extract_retry_after(f"{output} {error}")
+        # retry-after: só de stderr e headers (nunca do corpo da resposta).
+        retry_after = self._extract_retry_after(error or "")
         if not retry_after and headers.get("retry-after"):
             try:
                 retry_after = int(headers["retry-after"])
             except ValueError:
                 pass
 
-        # Determinar se é secondary: mensagem explícita, OU remaining > 0
-        # (se ainda tem pontos mas tomou rate limit, é secondary/abuse)
+        # Classificação secondary vs primary — só depois de confirmado o limite:
+        #  - remaining > 0 (ainda há cota) => secondary/abuse
+        #  - retry-after presente => secondary
+        #  - menção explícita a "secondary rate limit" no stderr => secondary
         h_remaining = headers.get("x-ratelimit-remaining")
+        remaining_int = None
+        if h_remaining is not None:
+            try:
+                remaining_int = int(h_remaining)
+            except ValueError:
+                remaining_int = None
+
         is_secondary = (
-            "secondary rate limit" in combined
+            "secondary rate limit" in err_lc
             or retry_after is not None
-            or (h_remaining is not None and int(h_remaining) > 0)
+            or (remaining_int is not None and remaining_int > 0)
         )
 
         if is_secondary:
@@ -207,7 +262,8 @@ class GitHubBoardAdapter(BoardPort):
                         f"throttle: {self._throttle_value}s) "
                         f"- aguardando {wait}s (retorna às {back_at})",
                         wait_seconds=wait, retry_after=retry_after,
-                        remaining=h_remaining, throttle=self._throttle_value)
+                        remaining=h_remaining, throttle=self._throttle_value,
+                        status=status)
             self._throttle_hit()
             time.sleep(wait)
             return True
@@ -352,9 +408,21 @@ class GitHubBoardAdapter(BoardPort):
         return raw, {}
 
     def _parse_headers(self, header_block: str) -> dict:
-        """Parse dos headers HTTP em um dict (chaves lowercase)."""
+        """Parse dos headers HTTP em um dict (chaves lowercase).
+
+        A linha de status ("HTTP/2 403 Forbidden") é guardada sob a chave
+        sintética "__status__" (int) para permitir detecção de rate limit sem
+        inspecionar o corpo da resposta.
+        """
         headers = {}
         for line in header_block.splitlines():
+            stripped = line.strip()
+            # Linha de status HTTP: "HTTP/1.1 403 Forbidden" / "HTTP/2 200"
+            if stripped.upper().startswith("HTTP/"):
+                parts = stripped.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    headers["__status__"] = int(parts[1])
+                continue
             if ":" in line:
                 key, value = line.split(":", 1)
                 headers[key.strip().lower()] = value.strip()

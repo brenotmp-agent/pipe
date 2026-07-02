@@ -177,6 +177,25 @@ dentro de `_handle_rate_limit`, que já roda dentro de `_gh`/`_gql` — causaria
 recursão). As demais chamadas `subprocess.run` ficam dentro de `_gh`/`_gql`,
 sempre após `_throttle()`.
 
+### Detecção de rate limit por transporte (não pelo corpo)
+
+`_handle_rate_limit` decide **exclusivamente** por sinais de transporte:
+
+- `headers["__status__"]` (linha de status HTTP parseada em `_parse_headers`)
+  igual a `403`/`429`;
+- `stderr` do `gh` mencionando "rate limit";
+- `_graphql_rate_limited(output)`, que parseia o JSON e olha apenas
+  `data.errors[].type` (`RATE_LIMITED`/`FORBIDDEN`) — a seção estruturada de
+  erros da API.
+
+O corpo (`output`/stdout) **nunca** é escaneado por substring. Regressão
+corrigida: a versão anterior fazia `combined = f"{output} {error}"` e buscava
+"rate limit" no corpo. Uma issue cujo título/body continha "Rate Limit" (ex.:
+issue de análise de custo de API) fazia toda `list_issues` (HTTP 200,
+`remaining` ~5000) ser classificada como *secondary rate limit*, escalando
+throttle até 64s e ativando penalty por horas sem nenhum limite real.
+Cobertura em `tests/test_rate_limit_detection.py`.
+
 ## Seleção de Tarefas (keep_task)
 
 - Boards ordenados por prioridade (menor = mais prioritário)
