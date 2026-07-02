@@ -1,6 +1,5 @@
 """Agent core - port para execução de agentes."""
 
-import json
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -10,10 +9,6 @@ from src.core.commands import annotations_doc, split_body
 from src.core.snapshot import BOARDS_DIR
 
 REPO_DIR = Path("repo")
-
-# KIRO_HOME isolado da esteira: agentes nativos gerados ficam aqui, fora do
-# ~/.kiro do usuário e fora do repo alvo (que é o cwd da execução).
-KIRO_HOME = Path(".pipe/kiro-home")
 
 CONTEXTS_DIR = Path("contexts")
 
@@ -60,58 +55,11 @@ def resolve_work_dir(config: dict, board_cfg: dict) -> Path:
     return (REPO_DIR / resolve_repo_id(config, board_cfg)).resolve()
 
 
-def kiro_home() -> Path:
-    """Diretório KIRO_HOME isolado da esteira (absoluto)."""
-    return KIRO_HOME.resolve()
-
-
-def generate_native_agents(config: dict) -> Path:
-    """Gera os configs de agente nativos do kiro-cli a partir do pipe.yml.
-
-    Para cada agente em `agents.<plataforma>.<id>`, escreve
-    `<KIRO_HOME>/agents/<id>.json` com:
-      - name: id do agente
-      - description: nome amigável (campo `name` do pipe.yml)
-      - prompt: file:// para contexts/<plataforma>/<id>.md (system prompt)
-      - model: agent_cfg.model (se definido)
-      - tools: ["*"] (o sandbox é garantido pelo cwd no repo)
-
-    Os configs são globais nesse KIRO_HOME, evitando poluir o repo alvo (que é
-    o cwd da execução) e o ~/.kiro do usuário. Retorna o caminho do KIRO_HOME.
-    """
-    home = kiro_home()
-    agents_dir = home / "agents"
-    agents_dir.mkdir(parents=True, exist_ok=True)
-
-    # Limpa configs antigos para refletir exatamente o pipe.yml atual.
-    for old in agents_dir.glob("*.json"):
-        old.unlink()
-
-    for platform_id, platform_agents in config.get("agents", {}).items():
-        for agent_id, agent_cfg in platform_agents.items():
-            ctx_file = (CONTEXTS_DIR / platform_id / f"{agent_id}.md").resolve()
-            spec = {
-                "name": agent_id,
-                "description": agent_cfg.get("name", agent_id),
-                "prompt": f"file://{ctx_file}",
-                "tools": ["*"],
-            }
-            model = agent_cfg.get("model")
-            if model:
-                spec["model"] = model
-
-            (agents_dir / f"{agent_id}.json").write_text(
-                json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-
-    return home
-
-
 @dataclass
 class AgentParams:
     """Parâmetros para execução do agente."""
     platform: str
-    agent_id: str          # id do agente nativo (usado em --agent)
+    agent_id: str          # id do agente resolvido (config)
     agent_name: str        # nome amigável (log)
     model: str
     issue_id: str
@@ -119,7 +67,6 @@ class AgentParams:
     col_id: str
     prompt: str
     work_dir: str          # diretório de trabalho do agente (clone em repo/<repo_id>)
-    kiro_home: str         # KIRO_HOME isolado com os agentes nativos gerados
     repo_id: str = None    # id do repositório alvo (chave em git.repo)
     context: str = None
 

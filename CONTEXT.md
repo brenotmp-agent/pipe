@@ -203,7 +203,14 @@ Precedência: agente (default) < coluna (`effort`) < tag `/effort` no body (se `
 
 ### Contexto do agente
 
-Cada agente tem um arquivo em `contexts/<plataforma>/<agente>.md` que é enviado como contexto na execução. Validado no `check_config` (deve existir e não estar vazio).
+Cada agente tem um arquivo em `contexts/<plataforma>/<agente>.md` que é enviado
+como contexto na execução. Validado no `check_config` (deve existir e não
+estar vazio).
+
+O contexto é entregue **concatenado no início do input** do `kiro-cli chat`
+(via `_compose_input`: `contexto + "---" + prompt`), não via `--agent`. A
+execução usa o `~/.kiro` padrão do kiro-cli — não há `KIRO_HOME` isolado nem
+geração de configs de agente nativos.
 
 ### Log de execução
 

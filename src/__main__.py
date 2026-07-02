@@ -78,11 +78,6 @@ def startup(config: dict):
         log.info("Startup", f"Removendo {repo_id}")
         shutil.rmtree(REPO_DIR / repo_id)
 
-    # Gerar os agentes nativos do kiro-cli (KIRO_HOME isolado)
-    from src.core.agent import generate_native_agents
-    home = generate_native_agents(config)
-    log.info("Startup", f"Agentes nativos gerados em {home / 'agents'}")
-
 
 def board_full_sync(config: dict):
     global board
@@ -295,7 +290,7 @@ def call_agent(config: dict, task: dict | None):
     col = task["column"]
     issue = task["issue"]
 
-    from src.core.agent import (AgentParams, build_prompt, kiro_home,
+    from src.core.agent import (AgentParams, build_prompt,
                                 resolve_agent_id, resolve_repo_id,
                                 resolve_work_dir)
     from src.adapters.kiro_cli_agent import KiroCliAgent
@@ -335,7 +330,6 @@ def call_agent(config: dict, task: dict | None):
         col_id=col_id,
         prompt=prompt,
         work_dir=str(work_dir),
-        kiro_home=str(kiro_home()),
         repo_id=repo_id,
     )
 
