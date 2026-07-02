@@ -4,6 +4,18 @@ Status: draft
 Owner: product
 Last updated: 2026-07-02
 
+## Esclarecimento de escopo — "sem humano"
+Confirmado com o negócio: "sem a presença de um humano" refere-se à **operação
+autônoma do runtime** — subir e rodar o loop principal em container sem setup
+manual do host nem prompts interativos. Os gates de aprovação do fluxo
+(`need_human`: Aprovação Negócio, Validação Negocial, Validação Arquitetural,
+Homologação) **permanecem**. A intervenção humana nesses pontos não ocorre na
+estrutura local: o humano atua **diretamente no board do GitHub** (move o card
+no site); no ciclo seguinte a esteira sincroniza a issue localmente e retoma o
+trabalho automaticamente. Ou seja, o container roda ininterruptamente e a espera
+por humano é resolvida pelo próprio mecanismo de sync com o board, sem exigir
+acesso à máquina que hospeda o container.
+
 ## Inputs
 - Issue #1 "Rodar no Docker"
 - README.md

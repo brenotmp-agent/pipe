@@ -50,6 +50,12 @@ intervenção humana durante a execução.
   continuam sendo pontos de espera humana — "sem humano" refere-se à operação
   do runtime, não à eliminação dos gates de aprovação do fluxo.
 
+**Mecanismo de espera humana (confirmado):** a intervenção humana nesses gates
+não exige acesso à máquina/container. O humano atua diretamente no board do
+GitHub (move o card no site); no ciclo seguinte a esteira sincroniza a issue
+localmente e retoma o trabalho automaticamente. O container permanece rodando o
+loop ininterruptamente enquanto aguarda.
+
 ## Épico: Documentação de operação
 
 **Objetivo:** documentação simples e completa do que é necessário para colocar
