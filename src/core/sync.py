@@ -551,8 +551,9 @@ def _apply_change_up(board_id: str, item: ChangeItem, board_obj: Board,
     history_file = body_path.parent / f"{slug}-history.md"
     history_file.write_text(_format_history(comments), encoding="utf-8")
 
-    log.info("Sync", f"[{board_id}] change-up #{item.id} -> {current_col}",
-             issue_id=item.id, column=current_col)
+    col_label = f"{old_col} -> {current_col}" if old_col and old_col != current_col else f"-> {current_col}"
+    log.info("Sync", f"[{board_id}] change-up #{item.id} {col_label}",
+             issue_id=item.id, column=current_col, from_column=old_col)
 
     # Atualizar snapshot
     issue_data["body_path"] = str(body_path)

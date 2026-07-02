@@ -346,7 +346,8 @@ def sleep_time(config: dict, had_changes: bool, task: dict | None):
     if had_changes or task is not None:
         return
     seconds = config["sleep"]
-    log.info("Sleep", f"Nenhuma atividade - dormindo {seconds}s")
+    back_at = (datetime.now() + timedelta(seconds=seconds)).strftime('%H:%M:%S')
+    log.info("Sleep", f"Nenhuma atividade - dormindo {seconds}s (retorna às {back_at})")
     time.sleep(seconds)
 
 
