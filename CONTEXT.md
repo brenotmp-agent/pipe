@@ -1,6 +1,6 @@
 # Contexto e Decisões — Esteira Agêntica v2
 
-Data: 2026-06-28
+Data: 2026-07-02
 
 ## Versionamento
 
@@ -103,6 +103,78 @@ Gatilhos para `change-down`:
 - Persistida em `.pipe/changeQueue.json`
 - Deduplicação por `event + id + identifier + board`
 - Limpa no startup (issues com status pendente são re-enfileiradas do snapshot)
+
+#### Flag `fullsync`
+
+Cada `ChangeItem` tem um booleano `fullsync` (default `False`):
+- `fullsync=True` → reconcilia **todas** as propriedades + dependências
+  (blocked_by/blocks, que só existem via REST). Usado em todo create e no
+  full sync diário.
+- `fullsync=False` → apenas a chamada única de propriedades (sem deps). Usado
+  em `change-down` incremental.
+- **Upgrade (superset)**: se um item equivalente já está na fila sem fullsync
+  e um novo full chega, o existente é promovido a `fullsync=True` (não
+  duplica). `same_target` ignora `fullsync` na deduplicação.
+
+## Otimização de Sincronização (v1.3.0)
+
+Objetivo: minimizar chamadas ao GitHub por issue. Duas estratégias combinadas.
+
+### Down — chamada única enriquecida
+
+`get_issue(board_id, issue_id, fullsync=False)` traz, numa **única query
+GraphQL**: title, body, state, updatedAt, labels, parent, children (subIssues),
+coluna (Status) e isArchived (via `projectItems`). As dependências
+(blocked_by/blocks) **não existem no GraphQL** (só REST) e só são buscadas
+quando `fullsync=True` (2 chamadas REST via `_get_dependencies`).
+
+Em cada evento down, o estado real do board é gravado no snapshot
+(`_write_state_from_issue`). Sem fullsync, `blocked_by`/`blocks` são
+**preservados** do snapshot (não vêm na chamada única) para não apagar o bloco
+`@---` de deps ao reescrever o `-body.md`. A coluna também vem do `get_issue`,
+eliminando o `list_issues` (paginação completa) que era feito antes.
+
+### Up — comparar antes de escrever
+
+`Board.apply_commands(board_id, issue_id, cmds, known=None)` compara o estado
+desejado (comandos do arquivo) contra o estado conhecido (`known`, do
+snapshot) e **só chama o setter do atributo que realmente mudou**. Os setters
+(`set_parent/children/blocked_by/blocks`) recebem `known_current`, evitando os
+GETs internos de leitura-antes-de-escrita. Retorna deltas
+`{rel: {added, removed}}` das relações para o gatilho recíproco.
+
+Sem `known` (reconciliação completa), comporta-se como antes (chama todos os
+setters, que descobrem o estado atual sozinhos).
+
+### Gatilho de par recíproco (dependências)
+
+Relações são bidirecionais no GitHub:
+
+| Relação em X | Par recíproco em Y |
+|--------------|--------------------|
+| `X.parent = Y` | `Y.children ∋ X` |
+| `X.children ∋ Y` | `Y.parent = X` |
+| `X.blocked_by ∋ Y` | `Y.blocks ∋ X` |
+| `X.blocks ∋ Y` | `Y.blocked_by ∋ X` |
+
+Ao detectar relação **adicionada/removida** em X (up ou down),
+`_trigger_reciprocal_downs` enfileira um `change-down fullsync` do alvo Y
+**apenas se o snapshot de Y estiver inconsistente** com o par recíproco:
+- adicionada: enfileira se Y **ainda não** reciproca X;
+- removida: enfileira se Y **ainda** reciproca X.
+
+Essa checagem de par (`_reciprocates`) é a **condição de parada**: quando o
+alvo já está coerente, nada é enfileirado — evitando reação em cadeia infinita.
+O estado desejado/real é sempre gravado no snapshot **antes** de disparar o
+gatilho. Alvos não rastreados no snapshot são ignorados.
+
+### Throttle
+
+Toda requisição respeita o throttle. `_get_rate_limit_info` chama
+`self._throttle()` diretamente (não pode rotear por `_gh`, pois é invocado de
+dentro de `_handle_rate_limit`, que já roda dentro de `_gh`/`_gql` — causaria
+recursão). As demais chamadas `subprocess.run` ficam dentro de `_gh`/`_gql`,
+sempre após `_throttle()`.
 
 ## Seleção de Tarefas (keep_task)
 
@@ -278,12 +350,23 @@ movimentações manuais.
 {
   "board": {"<col_id>": "<col_name>"},
   "issues": [
-    {"id": "1", "column": "...", "body_path": "...", "body_mtime": "...", "updated_at": "...", "status": "ok"}
+    {
+      "id": "1", "column": "...", "body_path": "...", "body_mtime": "...",
+      "updated_at": "...", "status": "ok",
+      "labels": [], "parent": null, "children": [],
+      "blocked_by": [], "blocks": [], "archived": false, "state": "open"
+    }
   ],
   "last_sync": null,
   "last_board_update": "..."
 }
 ```
+
+Os campos de estado (`labels`, `parent`, `children`, `blocked_by`, `blocks`,
+`archived`, `state`) guardam o **estado conhecido** da issue, usado para o diff
+no fluxo up e para a checagem de par recíproco. São gravados em todo evento
+up (estado desejado) e down (estado real do board). `status` é o campo de
+sincronismo (crash recovery), distinto de `state` (open/closed da issue).
 
 ## Pendências
 

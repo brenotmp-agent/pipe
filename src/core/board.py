@@ -38,6 +38,7 @@ class ChangeItem:
     identifier: str = None  # body_path para issues criadas localmente (sem id)
     board: str = None       # board_id ao qual a issue pertence
     uuid: str = None        # id único na fila (atribuído por add/addAll)
+    fullsync: bool = False  # se True, reconcilia todas as propriedades + deps
 
     @staticmethod
     def now() -> str:
@@ -45,7 +46,7 @@ class ChangeItem:
 
     @classmethod
     def of(cls, event, id: str = None, identifier: str = None,
-           board: str = None) -> "ChangeItem":
+           board: str = None, fullsync: bool = False) -> "ChangeItem":
         """Cria um ChangeItem com timestamp atual."""
         return cls(
             timestamp=cls.now(),
@@ -53,6 +54,7 @@ class ChangeItem:
             id=id,
             identifier=identifier,
             board=board,
+            fullsync=fullsync,
         )
 
     def same_target(self, other: "ChangeItem") -> bool:
@@ -109,8 +111,12 @@ class BoardPort(ABC):
         pass
 
     @abstractmethod
-    def get_issue(self, board_id: str, issue_id: str) -> Issue:
-        """Busca uma issue específica."""
+    def get_issue(self, board_id: str, issue_id: str, fullsync: bool = False) -> Issue:
+        """Busca uma issue específica.
+
+        Quando fullsync=True, também traz dependencies (blocked_by/blocks),
+        que exigem chamadas REST extras não disponíveis no GraphQL.
+        """
         pass
 
     @abstractmethod
@@ -161,20 +167,36 @@ class BoardPort(ABC):
         """Remove uma única label da issue (mantém as demais)."""
         log.warning("Board", "remove_label não implementado neste adapter")
 
-    def set_parent(self, board_id: str, issue_id: str, parent_id: str | None) -> None:
-        """Define o parent (sub-issue de parent_id). None remove o vínculo."""
+    def set_parent(self, board_id: str, issue_id: str, parent_id: str | None,
+                   known_current=None) -> None:
+        """Define o parent (sub-issue de parent_id). None remove o vínculo.
+
+        known_current (opcional): parent atual conhecido, evita leitura extra.
+        """
         log.warning("Board", "set_parent não implementado neste adapter")
 
-    def set_children(self, board_id: str, issue_id: str, children_ids: list[str]) -> None:
-        """Define (SET) os filhos (sub-issues) desta issue."""
+    def set_children(self, board_id: str, issue_id: str, children_ids: list[str],
+                     known_current: list[str] | None = None) -> None:
+        """Define (SET) os filhos (sub-issues) desta issue.
+
+        known_current (opcional): filhos atuais conhecidos, evita leitura extra.
+        """
         log.warning("Board", "set_children não implementado neste adapter")
 
-    def set_blocked_by(self, board_id: str, issue_id: str, blocker_ids: list[str]) -> None:
-        """Define (SET) as issues que bloqueiam esta."""
+    def set_blocked_by(self, board_id: str, issue_id: str, blocker_ids: list[str],
+                       known_current: list[str] | None = None) -> None:
+        """Define (SET) as issues que bloqueiam esta.
+
+        known_current (opcional): blocked_by atual conhecido, evita leitura extra.
+        """
         log.warning("Board", "set_blocked_by não implementado neste adapter")
 
-    def set_blocks(self, board_id: str, issue_id: str, blocked_ids: list[str]) -> None:
-        """Define (SET) as issues que esta bloqueia."""
+    def set_blocks(self, board_id: str, issue_id: str, blocked_ids: list[str],
+                   known_current: list[str] | None = None) -> None:
+        """Define (SET) as issues que esta bloqueia.
+
+        known_current (opcional): blocks atual conhecido, evita leitura extra.
+        """
         log.warning("Board", "set_blocks não implementado neste adapter")
 
     def archive_issue(self, board_id: str, issue_id: str) -> None:
@@ -217,8 +239,8 @@ class Board:
     def list_issues_since(self, board_id: str, since: str) -> list[Issue]:
         return self._port.list_issues_since(board_id, since)
 
-    def get_issue(self, board_id: str, issue_id: str) -> Issue:
-        return self._port.get_issue(board_id, issue_id)
+    def get_issue(self, board_id: str, issue_id: str, fullsync: bool = False) -> Issue:
+        return self._port.get_issue(board_id, issue_id, fullsync)
 
     def create_issue(self, board_id: str, title: str, body: str, column: str) -> Issue:
         return self._port.create_issue(board_id, title, body, column)
@@ -250,17 +272,21 @@ class Board:
     def remove_label(self, board_id: str, issue_id: str, label: str):
         self._port.remove_label(board_id, issue_id, label)
 
-    def set_parent(self, board_id: str, issue_id: str, parent_id: str | None):
-        self._port.set_parent(board_id, issue_id, parent_id)
+    def set_parent(self, board_id: str, issue_id: str, parent_id: str | None,
+                   known_current=None):
+        self._port.set_parent(board_id, issue_id, parent_id, known_current)
 
-    def set_children(self, board_id: str, issue_id: str, children_ids: list[str]):
-        self._port.set_children(board_id, issue_id, children_ids)
+    def set_children(self, board_id: str, issue_id: str, children_ids: list[str],
+                     known_current: list[str] | None = None):
+        self._port.set_children(board_id, issue_id, children_ids, known_current)
 
-    def set_blocked_by(self, board_id: str, issue_id: str, blocker_ids: list[str]):
-        self._port.set_blocked_by(board_id, issue_id, blocker_ids)
+    def set_blocked_by(self, board_id: str, issue_id: str, blocker_ids: list[str],
+                       known_current: list[str] | None = None):
+        self._port.set_blocked_by(board_id, issue_id, blocker_ids, known_current)
 
-    def set_blocks(self, board_id: str, issue_id: str, blocked_ids: list[str]):
-        self._port.set_blocks(board_id, issue_id, blocked_ids)
+    def set_blocks(self, board_id: str, issue_id: str, blocked_ids: list[str],
+                   known_current: list[str] | None = None):
+        self._port.set_blocks(board_id, issue_id, blocked_ids, known_current)
 
     def archive_issue(self, board_id: str, issue_id: str):
         self._port.archive_issue(board_id, issue_id)
@@ -268,37 +294,96 @@ class Board:
     def unarchive_issue(self, board_id: str, issue_id: str):
         self._port.unarchive_issue(board_id, issue_id)
 
-    def apply_commands(self, board_id: str, issue_id: str, cmds) -> None:
+    def apply_commands(self, board_id: str, issue_id: str, cmds, known: dict = None) -> dict:
         """Aplica os comandos anotados (IssueCommands) como atributos no board.
 
         Filosofia presença/ausência: o estado enviado reflete exatamente o que
         está declarado. Labels usam SET (substitui todas), incluindo a label
         especial need_human via all_labels().
+
+        `known` (opcional) é o estado conhecido da issue (snapshot). Quando
+        fornecido, cada setter só é chamado se o valor desejado difere do
+        conhecido, e o estado conhecido é repassado ao setter para evitar GETs
+        redundantes. Sem `known`, comporta-se como reconciliação completa
+        (chama todos os setters, que descobrem o estado atual sozinhos).
+
+        Retorna deltas das relações para o gatilho de par recíproco:
+          {parent:  {"added": [...], "removed": [...]},
+           children:{...}, blocked_by:{...}, blocks:{...}}
+        Onde 'added'/'removed' são numbers de issues (str).
         """
-        # Labels (SET completo, inclui need_human como label comum no board)
-        self.set_labels(board_id, issue_id, cmds.all_labels())
+        deltas = {
+            "parent": {"added": [], "removed": []},
+            "children": {"added": [], "removed": []},
+            "blocked_by": {"added": [], "removed": []},
+            "blocks": {"added": [], "removed": []},
+        }
+        has_known = known is not None
+        known = known or {}
 
-        # Relações hierárquicas
-        self.set_parent(board_id, issue_id, cmds.parent)
-        self.set_children(board_id, issue_id, cmds.children)
+        # ── Labels (SET; inclui need_human como label comum no board) ──────────
+        desired_labels = cmds.all_labels()
+        if not has_known or set(desired_labels) != set(known.get("labels") or []):
+            self.set_labels(board_id, issue_id, desired_labels)
 
-        # Dependências
-        self.set_blocked_by(board_id, issue_id, cmds.blocked_by)
-        self.set_blocks(board_id, issue_id, cmds.blocks)
+        # ── Parent ─────────────────────────────────────────────────────────────
+        desired_parent = str(cmds.parent) if cmds.parent else None
+        known_parent = known.get("parent")
+        known_parent = str(known_parent) if known_parent else None
+        if not has_known or desired_parent != known_parent:
+            self.set_parent(board_id, issue_id, cmds.parent,
+                            known_current=(known_parent if has_known else None))
+            if desired_parent and desired_parent != known_parent:
+                deltas["parent"]["added"].append(desired_parent)
+            if known_parent and desired_parent != known_parent:
+                deltas["parent"]["removed"].append(known_parent)
 
-        # Arquivamento (presença arquiva; ausência desarquiva)
-        if cmds.archive:
-            self.archive_issue(board_id, issue_id)
-        else:
-            self.unarchive_issue(board_id, issue_id)
+        # ── Children ────────────────────────────────────────────────────────────
+        desired_children = {str(c) for c in (cmds.children or [])}
+        known_children = {str(c) for c in (known.get("children") or [])}
+        if not has_known or desired_children != known_children:
+            self.set_children(board_id, issue_id, list(desired_children),
+                              known_current=(list(known_children) if has_known else None))
+            deltas["children"]["added"] = list(desired_children - known_children)
+            deltas["children"]["removed"] = list(known_children - desired_children)
 
-        # Fechamento / reabertura
-        # (close presente fecha; reopen presente reabre; ausência de ambos
-        #  não altera o estado open/closed)
+        # ── Dependências: blocked_by ─────────────────────────────────────────────
+        desired_bb = {str(b) for b in (cmds.blocked_by or [])}
+        known_bb = {str(b) for b in (known.get("blocked_by") or [])}
+        if not has_known or desired_bb != known_bb:
+            self.set_blocked_by(board_id, issue_id, list(desired_bb),
+                                known_current=(list(known_bb) if has_known else None))
+            deltas["blocked_by"]["added"] = list(desired_bb - known_bb)
+            deltas["blocked_by"]["removed"] = list(known_bb - desired_bb)
+
+        # ── Dependências: blocks ─────────────────────────────────────────────────
+        desired_bk = {str(b) for b in (cmds.blocks or [])}
+        known_bk = {str(b) for b in (known.get("blocks") or [])}
+        if not has_known or desired_bk != known_bk:
+            self.set_blocks(board_id, issue_id, list(desired_bk),
+                            known_current=(list(known_bk) if has_known else None))
+            deltas["blocks"]["added"] = list(desired_bk - known_bk)
+            deltas["blocks"]["removed"] = list(known_bk - desired_bk)
+
+        # ── Arquivamento (presença arquiva; ausência desarquiva) ─────────────────
+        desired_archived = bool(cmds.archive)
+        if not has_known or desired_archived != bool(known.get("archived")):
+            if desired_archived:
+                self.archive_issue(board_id, issue_id)
+            else:
+                self.unarchive_issue(board_id, issue_id)
+
+        # ── Fechamento / reabertura ──────────────────────────────────────────────
+        # close presente fecha; reopen presente reabre; ausência não altera.
+        known_state = (known.get("state") or "").lower() if has_known else None
         if cmds.close:
-            self.close_issue(board_id, issue_id)
+            if not has_known or known_state != "closed":
+                self.close_issue(board_id, issue_id)
         elif cmds.reopen:
-            self.reopen_issue(board_id, issue_id)
+            if not has_known or known_state != "open":
+                self.reopen_issue(board_id, issue_id)
+
+        return deltas
 
     def apply_column_events(self, board_id: str, issue_id: str, events: list[str]) -> None:
         """Aplica eventos de coluna (on_in/on_out).
@@ -373,7 +458,8 @@ class Board:
                 max_updated = issue.updated_at
 
             if known is None:
-                if queue.add(ChangeItem.of(SyncEvent.CREATE_DOWN, id=issue_id, board=board_id)):
+                if queue.add(ChangeItem.of(SyncEvent.CREATE_DOWN, id=issue_id,
+                                           board=board_id, fullsync=True)):
                     added += 1
                 continue
 
@@ -382,7 +468,9 @@ class Board:
             changed = (remote_at and snap_at and remote_at > snap_at) or \
                       (issue.column and issue.column != known.get("column"))
             if changed:
-                if queue.add(ChangeItem.of(SyncEvent.CHANGE_DOWN, id=issue_id, board=board_id)):
+                # Full sync diário: reconcilia todas as propriedades + deps.
+                if queue.add(ChangeItem.of(SyncEvent.CHANGE_DOWN, id=issue_id,
+                                           board=board_id, fullsync=True)):
                     known["status"] = SyncEvent.CHANGE_DOWN.value
                     added += 1
 

@@ -78,6 +78,154 @@ def _compose_down_body(issue: Issue) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Estado conhecido no snapshot + gatilho de par recíproco (dependências)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Mapa de relação -> relação recíproca no alvo.
+# Se X.parent = Y      então Y.children contém X
+# Se X.children ∋ Y     então Y.parent = X
+# Se X.blocked_by ∋ Y   então Y.blocks contém X
+# Se X.blocks ∋ Y       então Y.blocked_by contém X
+_RECIPROCAL = {
+    "parent": "children",
+    "children": "parent",
+    "blocked_by": "blocks",
+    "blocks": "blocked_by",
+}
+
+
+def _empty_state() -> dict:
+    """Estado conhecido vazio (para issues recém-criadas, sem baseline)."""
+    return {
+        "labels": [], "parent": None, "children": [],
+        "blocked_by": [], "blocks": [], "archived": False, "state": "open",
+    }
+
+
+def _known_state(issue_data: dict) -> dict:
+    """Extrai o estado conhecido (para diff) de um registro de snapshot."""
+    if not issue_data:
+        return _empty_state()
+    return {
+        "labels": list(issue_data.get("labels") or []),
+        "parent": issue_data.get("parent"),
+        "children": list(issue_data.get("children") or []),
+        "blocked_by": list(issue_data.get("blocked_by") or []),
+        "blocks": list(issue_data.get("blocks") or []),
+        "archived": bool(issue_data.get("archived")),
+        "state": (issue_data.get("state") or "open"),
+    }
+
+
+def _write_state_from_cmds(issue_data: dict, cmds) -> None:
+    """Grava no snapshot o estado desejado declarado nos comandos (fluxo up)."""
+    issue_data["labels"] = cmds.all_labels()
+    issue_data["parent"] = str(cmds.parent) if cmds.parent else None
+    issue_data["children"] = [str(c) for c in (cmds.children or [])]
+    issue_data["blocked_by"] = [str(b) for b in (cmds.blocked_by or [])]
+    issue_data["blocks"] = [str(b) for b in (cmds.blocks or [])]
+    issue_data["archived"] = bool(cmds.archive)
+    if cmds.close:
+        issue_data["state"] = "closed"
+    elif cmds.reopen:
+        issue_data["state"] = "open"
+
+
+def _write_state_from_issue(issue_data: dict, issue, fullsync: bool) -> None:
+    """Grava no snapshot o estado real vindo do board (fluxo down).
+
+    Sempre grava labels/parent/children/archived/state (chamada única).
+    blocked_by/blocks só são sobrescritos em fullsync (senão preserva o que já
+    havia no snapshot, pois deps não vêm na chamada única).
+    """
+    issue_data["labels"] = list(issue.labels or [])
+    issue_data["parent"] = issue.parent
+    issue_data["children"] = list(issue.children or [])
+    issue_data["archived"] = bool(getattr(issue, "archived", False))
+    issue_data["state"] = (issue.state or "open")
+    if fullsync:
+        issue_data["blocked_by"] = list(issue.blocked_by or [])
+        issue_data["blocks"] = list(issue.blocks or [])
+
+
+def _find_snapshot_issue(target_id: str) -> tuple[str, dict] | None:
+    """Localiza o registro de snapshot de uma issue em qualquer board.
+
+    Retorna (board_id, issue_data) ou None se a issue não é rastreada.
+    """
+    if not BOARDS_DIR.exists():
+        return None
+    for snap_file in BOARDS_DIR.glob("*/snapshot.json"):
+        board_id = snap_file.parent.name
+        snap = Snapshot(board_id).load()
+        data = snap.issue(target_id)
+        if data is not None:
+            return board_id, data
+    return None
+
+
+def _reciprocates(target_data: dict, reciprocal_rel: str, source_id: str) -> bool:
+    """True se o snapshot do alvo já reflete o par recíproco apontando p/ source."""
+    source_id = str(source_id)
+    if reciprocal_rel == "parent":
+        return str(target_data.get("parent") or "") == source_id
+    return source_id in {str(x) for x in (target_data.get(reciprocal_rel) or [])}
+
+
+def _trigger_reciprocal_downs(source_id: str, deltas: dict, queue) -> None:
+    """Enfileira down fullsync dos alvos cujo par recíproco está inconsistente.
+
+    Para cada relação com alvos adicionados/removidos, checa o snapshot do
+    alvo:
+      - adicionado: enfileira se o alvo AINDA NÃO reciproca source (par a criar)
+      - removido:   enfileira se o alvo AINDA reciproca source (par a desfazer)
+    A checagem de par é a condição de parada: quando o alvo já está coerente,
+    nada é enfileirado, evitando reação em cadeia infinita.
+    """
+    for rel, reciprocal_rel in _RECIPROCAL.items():
+        change = deltas.get(rel) or {}
+        for target_id in change.get("added", []):
+            found = _find_snapshot_issue(str(target_id))
+            if not found:
+                continue  # alvo não rastreado - ignora
+            t_board, t_data = found
+            if not _reciprocates(t_data, reciprocal_rel, source_id):
+                if queue.add(ChangeItem.of(SyncEvent.CHANGE_DOWN, id=str(target_id),
+                                           board=t_board, fullsync=True)):
+                    log.info("Sync", f"[{t_board}] #{target_id} down full (par {rel} "
+                             f"adicionado por #{source_id})")
+        for target_id in change.get("removed", []):
+            found = _find_snapshot_issue(str(target_id))
+            if not found:
+                continue
+            t_board, t_data = found
+            if _reciprocates(t_data, reciprocal_rel, source_id):
+                if queue.add(ChangeItem.of(SyncEvent.CHANGE_DOWN, id=str(target_id),
+                                           board=t_board, fullsync=True)):
+                    log.info("Sync", f"[{t_board}] #{target_id} down full (par {rel} "
+                             f"removido por #{source_id})")
+
+
+def _deps_deltas_from_snapshot(issue, issue_data: dict) -> dict:
+    """Calcula deltas de blocked_by/blocks entre issue (board) e snapshot.
+
+    Usado no fluxo down fullsync para disparar o gatilho de par recíproco.
+    Retorna deltas só das relações de dependência (parent/children não mudam
+    de forma reflexiva no down).
+    """
+    known_bb = {str(x) for x in (issue_data.get("blocked_by") or [])}
+    known_bk = {str(x) for x in (issue_data.get("blocks") or [])}
+    now_bb = {str(x) for x in (issue.blocked_by or [])}
+    now_bk = {str(x) for x in (issue.blocks or [])}
+    return {
+        "blocked_by": {"added": list(now_bb - known_bb),
+                       "removed": list(known_bb - now_bb)},
+        "blocks": {"added": list(now_bk - known_bk),
+                   "removed": list(known_bk - now_bk)},
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # sync_remote - busca mudanças do board remoto desde last_board_update
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -102,7 +250,10 @@ def sync_remote(board_id: str, board_obj: Board, queue: ChangeQueue):
 
         known = snapshot_by_id.get(issue_id)
         if known is None:
-            if queue.add(ChangeItem.of(SyncEvent.CREATE_DOWN, id=issue_id, board=board_id)):
+            # Create precisa de fullsync: monta o body com deps (from_issue) e
+            # não há baseline no snapshot para preservá-las.
+            if queue.add(ChangeItem.of(SyncEvent.CREATE_DOWN, id=issue_id,
+                                       board=board_id, fullsync=True)):
                 log.info("Sync", f"[{board_id}] #{issue_id} create-down")
         else:
             if queue.add(ChangeItem.of(SyncEvent.CHANGE_DOWN, id=issue_id, board=board_id)):
@@ -209,13 +360,13 @@ def apply_changes(board_id: str, board_obj: Board, queue: ChangeQueue, config: d
 
         try:
             if item.event == SyncEvent.CREATE_UP.value:
-                _apply_create_up(board_id, item, board_obj)
+                _apply_create_up(board_id, item, board_obj, queue)
             elif item.event == SyncEvent.CREATE_DOWN.value:
-                _apply_create_down(board_id, item, board_obj)
+                _apply_create_down(board_id, item, board_obj, queue)
             elif item.event == SyncEvent.CHANGE_UP.value:
-                _apply_change_up(board_id, item, board_obj, config)
+                _apply_change_up(board_id, item, board_obj, queue, config)
             elif item.event == SyncEvent.CHANGE_DOWN.value:
-                _apply_change_down(board_id, item, board_obj, config)
+                _apply_change_down(board_id, item, board_obj, queue, config)
             elif item.event == SyncEvent.DELETE_UP.value:
                 _apply_delete_up(board_id, item, board_obj)
             elif item.event == SyncEvent.DELETE_DOWN.value:
@@ -227,7 +378,7 @@ def apply_changes(board_id: str, board_obj: Board, queue: ChangeQueue, config: d
             return
 
 
-def _apply_create_up(board_id: str, item: ChangeItem, board_obj: Board):
+def _apply_create_up(board_id: str, item: ChangeItem, board_obj: Board, queue: ChangeQueue = None):
     """Cria issue no board a partir do arquivo local."""
     snap = Snapshot(board_id).load()
     issue_data = next((i for i in snap.issues if i.get("body_path") == item.identifier), None)
@@ -251,9 +402,12 @@ def _apply_create_up(board_id: str, item: ChangeItem, board_obj: Board):
     log.info("Sync", f"[{board_id}] create-up '{title}' -> #{created.id}",
              issue_id=created.id, column=column)
 
-    # Aplicar comandos (labels, relações, etc) como atributos no board
+    # Aplicar comandos (labels, relações, etc). Create parte de estado vazio:
+    # known=_empty_state() garante que os deltas 'added' reflitam tudo que foi
+    # declarado, e que os setters não façam GET redundante (nada existe ainda).
+    deltas = {}
     if not cmds.is_empty():
-        board_obj.apply_commands(board_id, created.id, cmds)
+        deltas = board_obj.apply_commands(board_id, created.id, cmds, known=_empty_state())
 
     # Verificar addcomment
     slug = body_path.stem.removesuffix("-body")
@@ -290,20 +444,22 @@ def _apply_create_up(board_id: str, item: ChangeItem, board_obj: Board):
     issue_data["body_mtime"] = str(new_files["body"].stat().st_mtime)
     issue_data["updated_at"] = created.updated_at
     issue_data["status"] = "ok"
+    # Gravar o estado desejado (declarado) como conhecido no snapshot ANTES de
+    # disparar o gatilho, para que o alvo, ao reciprocar, encontre este vínculo.
+    _write_state_from_cmds(issue_data, cmds)
     snap.save()
 
+    # Gatilho de par recíproco sobre as relações recém-criadas.
+    if queue is not None and deltas:
+        _trigger_reciprocal_downs(created.id, deltas, queue)
 
-def _apply_create_down(board_id: str, item: ChangeItem, board_obj: Board):
+
+def _apply_create_down(board_id: str, item: ChangeItem, board_obj: Board, queue: ChangeQueue = None):
     """Cria arquivos locais a partir do issue no board."""
     snap = Snapshot(board_id).load()
-    issue = board_obj.get_issue(board_id, item.id)
-    remote_full = board_obj.list_issues(board_id)
-    # Obter coluna do issue
-    column = ""
-    for ri in remote_full:
-        if str(ri.id) == str(item.id):
-            column = ri.column
-            break
+    issue = board_obj.get_issue(board_id, item.id, fullsync=item.fullsync)
+    # Coluna já vem na chamada única de get_issue (projectItems/Status).
+    column = issue.column or ""
 
     if not column:
         column = list(snap.board.keys())[0] if snap.board else ""
@@ -326,18 +482,27 @@ def _apply_create_down(board_id: str, item: ChangeItem, board_obj: Board):
              issue_id=item.id, column=column)
 
     # Atualizar snapshot
-    snap.issues.append({
+    new_data = {
         "id": item.id,
         "column": column,
         "body_path": str(files["body"]),
         "body_mtime": str(files["body"].stat().st_mtime),
         "updated_at": issue.updated_at,
         "status": "ok",
-    })
+    }
+    _write_state_from_issue(new_data, issue, fullsync=item.fullsync)
+    snap.issues.append(new_data)
     snap.save()
 
+    # Gatilho de par recíproco: alvos de deps recém-descobertas no board.
+    # Só em fullsync (única situação em que blocked_by/blocks vêm preenchidos).
+    if queue is not None and item.fullsync:
+        deltas = _deps_deltas_from_snapshot(issue, _empty_state())
+        _trigger_reciprocal_downs(item.id, deltas, queue)
 
-def _apply_change_up(board_id: str, item: ChangeItem, board_obj: Board, config: dict = None):
+
+def _apply_change_up(board_id: str, item: ChangeItem, board_obj: Board,
+                     queue: ChangeQueue = None, config: dict = None):
     """Propaga mudança local para o board."""
     snap = Snapshot(board_id).load()
     issue_data = snap.issue(item.id)
@@ -358,9 +523,11 @@ def _apply_change_up(board_id: str, item: ChangeItem, board_obj: Board, config: 
     # Atualizar body/title no board (body limpo, sem o bloco @---)
     board_obj.update_issue(board_id, item.id, title=title, body=body)
 
-    # Aplicar comandos como estado autoritativo. Mesmo bloco vazio é aplicado:
-    # ausência de um comando significa remoção (SET/presença-ausência).
-    board_obj.apply_commands(board_id, item.id, cmds)
+    # Aplicar comandos como estado autoritativo, comparando contra o estado
+    # conhecido (snapshot): só chama o setter do atributo que realmente mudou,
+    # e passa o estado conhecido ao setter para evitar GETs redundantes.
+    known = _known_state(issue_data)
+    deltas = board_obj.apply_commands(board_id, item.id, cmds, known=known)
 
     # Verificar mudança de coluna
     current_col = _col_from_path(body_path, board_id)
@@ -391,10 +558,17 @@ def _apply_change_up(board_id: str, item: ChangeItem, board_obj: Board, config: 
     issue_data["body_path"] = str(body_path)
     issue_data["body_mtime"] = str(body_path.stat().st_mtime)
     issue_data["status"] = "ok"
+    # Gravar o estado desejado como conhecido ANTES de disparar o gatilho.
+    _write_state_from_cmds(issue_data, cmds)
     snap.save()
 
+    # Gatilho de par recíproco sobre relações adicionadas/removidas.
+    if queue is not None and deltas:
+        _trigger_reciprocal_downs(item.id, deltas, queue)
 
-def _apply_change_down(board_id: str, item: ChangeItem, board_obj: Board, config: dict = None):
+
+def _apply_change_down(board_id: str, item: ChangeItem, board_obj: Board,
+                       queue: ChangeQueue = None, config: dict = None):
     """Propaga mudança do board para local."""
     snap = Snapshot(board_id).load()
     issue_data = snap.issue(item.id)
@@ -402,13 +576,15 @@ def _apply_change_down(board_id: str, item: ChangeItem, board_obj: Board, config
         return
 
     old_col = issue_data.get("column")
-    issue = board_obj.get_issue(board_id, item.id)
-    remote_full = board_obj.list_issues(board_id)
-    remote_col = ""
-    for ri in remote_full:
-        if str(ri.id) == str(item.id):
-            remote_col = ri.column
-            break
+    issue = board_obj.get_issue(board_id, item.id, fullsync=item.fullsync)
+    # Sem fullsync, deps (blocked_by/blocks) não vêm na chamada única. Para não
+    # apagar o bloco de deps ao reescrever o body, preserva o que o snapshot já
+    # conhece sobre as dependências desta issue.
+    if not item.fullsync:
+        issue.blocked_by = list(issue_data.get("blocked_by") or [])
+        issue.blocks = list(issue_data.get("blocks") or [])
+    # Coluna já vem na chamada única de get_issue (projectItems/Status).
+    remote_col = issue.column or ""
 
     body_path = _find_issue_files(board_id, item.id)
     if not body_path:
@@ -452,13 +628,24 @@ def _apply_change_down(board_id: str, item: ChangeItem, board_obj: Board, config
     log.info("Sync", f"[{board_id}] change-down #{item.id} -> {current_col}",
              issue_id=item.id, column=current_col)
 
+    # Gatilho de par recíproco: calcula deltas de deps ANTES de sobrescrever o
+    # estado conhecido no snapshot. Só em fullsync (deps preenchidas).
+    deps_deltas = None
+    if queue is not None and item.fullsync:
+        deps_deltas = _deps_deltas_from_snapshot(issue, issue_data)
+
     # Atualizar snapshot
     issue_data["column"] = current_col
     issue_data["body_path"] = str(body_path)
     issue_data["body_mtime"] = str(body_path.stat().st_mtime)
     issue_data["updated_at"] = issue.updated_at
     issue_data["status"] = "ok"
+    # Gravar o estado real do board como conhecido ANTES de disparar o gatilho.
+    _write_state_from_issue(issue_data, issue, fullsync=item.fullsync)
     snap.save()
+
+    if deps_deltas:
+        _trigger_reciprocal_downs(item.id, deps_deltas, queue)
 
     # Movimentação manual no board: aplicar on_out/on_in da mudança de coluna.
     # O snapshot NÃO é alterado aqui; reescrevemos o arquivo APÓS o body_mtime

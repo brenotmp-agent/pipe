@@ -10,6 +10,11 @@ from src.core.board import BoardPort, Issue, PenaltyException
 from src.core.log import log
 
 
+# Sentinela para diferenciar "não informado" (buscar do board) de None
+# (valor conhecido = sem parent). Usado nos setters que aceitam estado conhecido.
+_UNSET = object()
+
+
 class GitHubBoardAdapter(BoardPort):
     """Adapter para GitHub Projects V2."""
 
@@ -125,8 +130,13 @@ class GitHubBoardAdapter(BoardPort):
         Retorna dict com limit, remaining, reset (epoch), used, resource.
         Prioriza o recurso que está esgotado (remaining == 0).
         Não conta contra o primary rate limit.
+
+        NOTA: chamada de dentro de _handle_rate_limit (que roda dentro de
+        _gh/_gql). NÃO pode ser roteada por _gh (recursão infinita). Respeita
+        o throttle chamando self._throttle() diretamente.
         """
         try:
+            self._throttle()
             result = subprocess.run(
                 ["gh", "api", "rate_limit"],
                 capture_output=True, text=True
@@ -621,12 +631,25 @@ class GitHubBoardAdapter(BoardPort):
         all_issues = self.list_issues(board_id)
         return [i for i in all_issues if i.updated_at and i.updated_at > since]
 
-    def get_issue(self, board_id: str, issue_id: str) -> Issue:
+    def get_issue(self, board_id: str, issue_id: str, fullsync: bool = False) -> Issue:
         self._penalty_check()
-        log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - Buscando issue",
-                 operation="get_issue", board_id=board_id, issue_id=issue_id)
+        log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - Buscando issue"
+                 + (" (fullsync)" if fullsync else ""),
+                 operation="get_issue", board_id=board_id, issue_id=issue_id,
+                 fullsync=fullsync)
+        # Chamada única: propriedades + labels + parent + children + status
+        # (coluna) + isArchived do item do project. Dependencies (blocked_by/
+        # blocks) NÃO existem no GraphQL (só REST) e só são buscadas quando
+        # fullsync=True, via _get_dependencies (2 chamadas REST).
         data = self._gql(
-            "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){number title body state updatedAt labels(first:20){nodes{name}} parent{number} subIssues(first:50){nodes{number}}}}}",
+            "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){"
+            "number title body state updatedAt "
+            "labels(first:50){nodes{name}} "
+            "parent{number} "
+            "subIssues(first:50){nodes{number}} "
+            "projectItems(first:10){nodes{isArchived project{id} "
+            "fieldValues(first:10){nodes{...on ProjectV2ItemFieldSingleSelectValue{field{...on ProjectV2SingleSelectField{name}} name}}}}}"
+            "}}}",
             owner=self._repo.split("/")[0],
             repo=self._repo.split("/")[1],
             number=int(issue_id),
@@ -640,12 +663,32 @@ class GitHubBoardAdapter(BoardPort):
             for n in (issue.get("subIssues", {}) or {}).get("nodes", [])
             if n.get("number")
         ]
-        blocked_by, blocks = self._get_dependencies(issue_id)
+
+        # Coluna (Status) e arquivamento a partir do item do project deste board.
+        column = ""
+        archived = False
+        target_pid = (self._projects or {}).get(board_id, {}).get("project_id")
+        for pi in (issue.get("projectItems", {}) or {}).get("nodes", []):
+            pid = (pi.get("project") or {}).get("id")
+            if target_pid and pid != target_pid:
+                continue
+            archived = bool(pi.get("isArchived"))
+            for fv in (pi.get("fieldValues", {}) or {}).get("nodes", []):
+                if (fv.get("field") or {}).get("name") == "Status":
+                    column = fv.get("name", "")
+                    break
+            break
+
+        # Dependencies só no fullsync (2 chamadas REST extras).
+        blocked_by, blocks = ([], [])
+        if fullsync:
+            blocked_by, blocks = self._get_dependencies(issue_id)
+
         return Issue(
             id=str(issue["number"]),
             title=issue.get("title", ""),
             body=issue.get("body", ""),
-            column="",
+            column=column,
             labels=labels,
             updated_at=issue.get("updatedAt", ""),
             parent=parent,
@@ -653,6 +696,7 @@ class GitHubBoardAdapter(BoardPort):
             blocked_by=blocked_by,
             blocks=blocks,
             state=(issue.get("state") or "").lower(),
+            archived=archived,
         )
 
     def create_issue(self, board_id: str, title: str, body: str, column: str) -> Issue:
@@ -824,11 +868,18 @@ class GitHubBoardAdapter(BoardPort):
         self._api("DELETE", f"/repos/{owner}/{repo}/issues/{parent_number}/sub_issue",
                   sub_issue_id=child_db)
 
-    def set_children(self, board_id: str, issue_id: str, children_ids: list[str]) -> None:
-        """SET das sub-issues: adiciona faltantes e remove as não declaradas."""
+    def set_children(self, board_id: str, issue_id: str, children_ids: list[str],
+                     known_current: list[str] | None = None) -> None:
+        """SET das sub-issues: adiciona faltantes e remove as não declaradas.
+
+        known_current (se fornecido) evita o GET de listagem das sub-issues.
+        """
         self._penalty_check()
         desired = {str(c) for c in (children_ids or [])}
-        current = set(self._list_sub_issue_numbers(issue_id))
+        if known_current is not None:
+            current = {str(c) for c in known_current}
+        else:
+            current = set(self._list_sub_issue_numbers(issue_id))
         log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - children {sorted(desired)}",
                  operation="set_children", board_id=board_id, issue_id=issue_id)
         for child in desired - current:
@@ -836,21 +887,29 @@ class GitHubBoardAdapter(BoardPort):
         for child in current - desired:
             self._remove_sub_issue(issue_id, child)
 
-    def set_parent(self, board_id: str, issue_id: str, parent_id: str | None) -> None:
-        """Define o parent desta issue (sub-issue de parent_id). None remove."""
+    def set_parent(self, board_id: str, issue_id: str, parent_id: str | None,
+                   known_current=_UNSET) -> None:
+        """Define o parent desta issue (sub-issue de parent_id). None remove.
+
+        known_current (se != _UNSET) evita o GET do parent atual; passe o
+        number do parent conhecido ou None se sabidamente sem parent.
+        """
         self._penalty_check()
         owner, repo = self._repo.split("/")
         # Parent atual
-        current_parent = None
-        try:
-            result = self._gh(
-                "api", f"/repos/{owner}/{repo}/issues/{issue_id}/parent",
-                "-H", "Accept: application/vnd.github+json",
-            )
-            if result:
-                current_parent = str(json.loads(result).get("number"))
-        except Exception:
+        if known_current is not _UNSET:
+            current_parent = str(known_current) if known_current else None
+        else:
             current_parent = None
+            try:
+                result = self._gh(
+                    "api", f"/repos/{owner}/{repo}/issues/{issue_id}/parent",
+                    "-H", "Accept: application/vnd.github+json",
+                )
+                if result:
+                    current_parent = str(json.loads(result).get("number"))
+            except Exception:
+                current_parent = None
 
         log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - parent {parent_id}",
                  operation="set_parent", board_id=board_id, issue_id=issue_id)
@@ -881,13 +940,20 @@ class GitHubBoardAdapter(BoardPort):
             log.warning("GitHub", f"#{issue_number} - falha ao listar blocking: {e}")
         return blocked_by, blocks
 
-    def set_blocked_by(self, board_id: str, issue_id: str, blocker_ids: list[str]) -> None:
-        """SET das issues que bloqueiam esta (blocked_by)."""
+    def set_blocked_by(self, board_id: str, issue_id: str, blocker_ids: list[str],
+                       known_current: list[str] | None = None) -> None:
+        """SET das issues que bloqueiam esta (blocked_by).
+
+        known_current (se fornecido) evita as 2 chamadas REST de _get_dependencies.
+        """
         self._penalty_check()
         owner, repo = self._repo.split("/")
         desired = {str(b) for b in (blocker_ids or [])}
-        current_by, _ = self._get_dependencies(issue_id)
-        current = set(current_by)
+        if known_current is not None:
+            current = {str(b) for b in known_current}
+        else:
+            current_by, _ = self._get_dependencies(issue_id)
+            current = set(current_by)
         log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - blocked_by {sorted(desired)}",
                  operation="set_blocked_by", board_id=board_id, issue_id=issue_id)
         for b in desired - current:
@@ -902,18 +968,26 @@ class GitHubBoardAdapter(BoardPort):
                          "-H", "Accept: application/vnd.github+json",
                          f"/repos/{owner}/{repo}/issues/{issue_id}/dependencies/blocked_by/{db}")
 
-    def set_blocks(self, board_id: str, issue_id: str, blocked_ids: list[str]) -> None:
+    def set_blocks(self, board_id: str, issue_id: str, blocked_ids: list[str],
+                   known_current: list[str] | None = None) -> None:
         """SET das issues que esta bloqueia.
 
         A API só escreve no lado blocked_by; 'blocks' em N equivale a
         blocked_by desta em N. Implementado adicionando/removendo esta issue
         como blocker em cada N declarado.
+
+        known_current (se fornecido) evita as 2 chamadas REST de _get_dependencies.
         """
         self._penalty_check()
         owner, repo = self._repo.split("/")
         desired = {str(b) for b in (blocked_ids or [])}
-        _, current_blocks = self._get_dependencies(issue_id)
-        current = set(current_blocks)
+        if known_current is not None:
+            current = {str(b) for b in known_current}
+        else:
+            _, current_blocks = self._get_dependencies(issue_id)
+            current = set(current_blocks)
+        if desired == current:
+            return
         this_db = self._get_issue_db_id(issue_id)
         if not this_db:
             log.warning("GitHub", f"#{issue_id} - databaseId não resolvido para set_blocks")

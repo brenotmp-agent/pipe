@@ -243,7 +243,38 @@ eventos no bloco `@---` (sem tocar no snapshot); como o arquivo fica mais novo
 que o `body_mtime` salvo, o ciclo seguinte gera um `change-up` que sobe os
 status/labels resultantes — mantendo tudo sincronizado.
 
+## Otimização de Sincronização
+
+Para reduzir o número de requisições ao board por issue, o sync combina duas
+estratégias:
+
+- **Down (chamada única):** `get_issue` traz numa só query GraphQL título,
+  body, estado, labels, parent, filhos, coluna e arquivamento. As dependências
+  (`blocked_by`/`blocks`) só existem via REST e são buscadas apenas quando o
+  item da fila está marcado como `fullsync`.
+- **Up (comparar antes de escrever):** o estado desejado (comandos do arquivo)
+  é comparado com o estado conhecido no snapshot; só a diferença gera chamada.
+  Um `change-up` de "só body" cai de ~12 requisições para 1.
+
+### fullsync
+
+Cada item da fila tem um booleano `fullsync`. É `True` em todo create e no
+full sync diário (reconcilia propriedades + dependências); `False` em
+mudanças incrementais. Se um item full e um parcial coincidem no mesmo alvo,
+a fila promove o existente para full (sem duplicar).
+
+### Gatilho de par recíproco
+
+Relações são bidirecionais (`parent`↔`children`, `blocked_by`↔`blocks`). Ao
+detectar uma relação adicionada/removida numa issue, o sync enfileira um
+`change-down fullsync` do alvo **apenas se o snapshot do alvo ainda não
+refletir o par recíproco**. Essa checagem é a condição de parada e evita
+reação em cadeia infinita.
+
 ## Rate Limit (GitHub)
+
+Toda requisição respeita o throttle, inclusive dentro de loops de
+sincronização.
 
 ### Throttle
 - Sleep antes de cada chamada (inicia em 16s)
