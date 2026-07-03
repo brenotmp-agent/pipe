@@ -153,14 +153,34 @@ Se houve qualquer atividade (sync movimentou algo OU existe tarefa para executar
 | `create-merge` | Cria branch + cria PR |
 | `no-branch` | Sem operações de git |
 
-### Override de model/effort
+### Substituição de agente por nível (`override-agent`)
 
-Precedência: agente (default) < coluna (`effort`) < tag `/effort` no body (se `allow-overwrite: true`)
+Cada coluna define um agente default no atributo `agent`. Se a issue tiver uma
+tag `/agent_level <nível>` no bloco `@---` e esse `<nível>` for uma chave do
+mapa `override-agent` da coluna, a esteira usa o agente indicado no valor. Se
+não houver `/agent_level`, ou o nível não estiver mapeado, usa o `agent`
+default.
+
+Como cada agente carrega o próprio `model`, trocar o agente por nível troca
+também o model efetivo da execução.
+
+```yaml
+columns:
+  desenvolvimento:
+    agent: engineering          # default
+    override-agent:
+      low: generic              # /agent_level low  -> generic
+      high: senior-engineering  # /agent_level high -> senior-engineering
+```
+
+Validação (`config.py`): `override-agent` deve ser um mapa `<nível>: <agente>`,
+a coluna precisa ter um `agent` default, e todo agente referenciado deve existir
+em `agents`.
 
 ### Log de execução
 
 Cada execução gera um arquivo em `logs/<issue_id>/<timestamp>.md` com:
-- **Parâmetros**: plataforma, agente, model, effort, board, coluna, issue
+- **Parâmetros**: plataforma, agente, model, agent_level, board, coluna, issue
 - **Prompt**: prompt completo enviado ao agente
 - **Chat**: diálogo da execução (preenchido pelo adapter)
 
@@ -201,7 +221,7 @@ presente garante a relação/atributo; ausente, remove. Não há comandos de
 | `/blocked_by #N, #M` | esta issue está bloqueada por N e M |
 | `/blocks #N, #M` | esta issue bloqueia N e M |
 | `/labels a, b, c` | define (SET) as labels da issue |
-| `/effort low\|medium\|high` | esforço sugerido |
+| `/agent_level low\|medium\|high` | nível de agente (chave de `override-agent`) |
 | `/need_human` | marca intervenção humana (label especial) |
 | `/close [completed\|not_planned]` | fecha a issue |
 | `/reopen` | reabre a issue |
@@ -221,7 +241,7 @@ Validar credenciais e retornar JWT.
 /parent #10
 /blocked_by #42, #58
 /labels backend, security
-/effort high
+/agent_level high
 ```
 
 ## Eventos de coluna (`on_in` / `on_out`)

@@ -13,11 +13,12 @@ REPO_DIR = Path("repo")
 CONTEXTS_DIR = Path("contexts")
 
 
-def issue_level(issue: dict) -> str | None:
-    """Lê o nível de dificuldade da issue (tag /effort no bloco @---).
+def agent_level(issue: dict) -> str | None:
+    """Lê o nível de agente da issue (tag /agent_level no bloco @---).
 
     O nível funciona como um "planning poker" simplificado (low|medium|high
-    por padrão, configurável pelo usuário). É persistido no body via /effort.
+    por padrão, configurável pelo usuário). É persistido no body via
+    /agent_level.
     """
     body_path = Path(issue.get("body_path", ""))
     if not body_path.exists():
@@ -25,17 +26,17 @@ def issue_level(issue: dict) -> str | None:
     content = body_path.read_text(encoding="utf-8")
     raw_body = content.split("\n", 1)[1] if "\n" in content else ""
     _, cmds = split_body(raw_body)
-    return cmds.effort
+    return cmds.agent_level
 
 
 def resolve_agent_id(col: dict, issue: dict) -> str:
     """Resolve o agente efetivo de uma coluna conforme o nível da issue.
 
-    Usa `override-agent[<nível>]` quando o nível (tag /effort) existe e está
-    mapeado; caso contrário, cai no `agent` default da coluna.
+    Usa `override-agent[<nível>]` quando o nível (tag /agent_level) existe e
+    está mapeado; caso contrário, cai no `agent` default da coluna.
     """
     overrides = col.get("override-agent") or {}
-    level = issue_level(issue)
+    level = agent_level(issue)
     if level and level in overrides:
         return overrides[level]
     return col.get("agent", "")

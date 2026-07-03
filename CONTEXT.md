@@ -217,9 +217,13 @@ Cobertura em `tests/test_rate_limit_detection.py`.
 | `create-merge` | Git Setup (criar) + Commit & Push + PR + Cleanup |
 | `no-branch` | Nenhum bloco de git |
 
-### Override de model/effort
+### Substituição de agente por nível (`override-agent`)
 
-Precedência: agente (default) < coluna (`effort`) < tag `/effort` no body (se `allow-overwrite: true`)
+A coluna tem um `agent` default. Se a issue traz `/agent_level <nível>` no bloco
+`@---` e `<nível>` é chave de `override-agent`, usa o agente do valor; senão, o
+`agent` default. Como cada agente carrega o próprio `model`, a troca de agente
+também troca o model. Resolvido em `agent.py` (`agent_level` +
+`resolve_agent_id`), validado em `config.py`.
 
 ### Contexto do agente
 
@@ -243,7 +247,7 @@ continua de onde parou em vez de recomeçar do zero.
 - **Chave por agente**: `<board>/<issue>/<agente>`. O mesmo agente atuando em
   colunas diferentes retoma o próprio raciocínio; agentes distintos nunca
   herdam a sessão um do outro. O agente da chave é o **resolvido**
-  (`resolve_agent_id`, considera override por `/effort`).
+  (`resolve_agent_id`, considera override por `/agent_level`).
 - **Retomar**: antes de executar, se há `session_id` conhecido e ele **ainda
   existe** no kiro-cli (`--list-sessions` do cwd), passa `--resume-id <id>`.
 - **Capturar**: após executar, pega o id da sessão mais recente do cwd
@@ -268,7 +272,7 @@ Detalhes técnicos verificados no kiro-cli:
 ### Log de execução
 
 Gerado em `<log.dir>/<issue_id>/<timestamp>.md` com 3 seções:
-- **Parâmetros**: plataforma, agente, model, effort, board, coluna, issue, context
+- **Parâmetros**: plataforma, agente, model, agent_level, board, coluna, issue, context
 - **Prompt**: prompt completo montado por `build_prompt`
 - **Chat**: diálogo (preenchido durante execução)
 
@@ -312,11 +316,12 @@ boards:
       <id-column>:
         name: <nome>
         agent: <id-agent>
-        effort: low|medium|high
+        override-agent: {<nível>: <id-agent>}
         gitevents: create|use|merge|create-merge|no-branch
-        target-prompt: <objetivo da etapa>
-        allow-overwrite: true|false
+        prompt: <objetivo da etapa>
         archive: true|false
+        on_in: [<token>, ...]
+        on_out: [<token>, ...]
         change:
           advance: <id-column>
           <condition>: <id-column>
@@ -345,7 +350,7 @@ Módulo `src/core/commands.py`. O body de uma issue pode terminar com um bloco
 de comandos separado por uma linha `@---`.
 
 - `IssueCommands`: dataclass com parent, children[], blocked_by[], blocks[],
-  labels[], effort, close, archive, need_human.
+  labels[], agent_level, close, archive, need_human.
 - `split_body(raw)` → `(body_limpo, IssueCommands)`. Múltiplos `@---`: o último
   vence, anteriores removidos.
 - `compose_body(body, cmds)` → body completo com bloco.
