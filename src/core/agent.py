@@ -95,8 +95,15 @@ def build_prompt(config: dict, task: dict) -> str:
     col = task["column"]
     col_id = task["col_id"]
     issue = task["issue"]
-    agent_name = resolve_agent_id(col, issue)
+    agent_id = resolve_agent_id(col, issue)
     gitevents = col.get("gitevents")  # create|use|merge|create-merge|no-branch
+
+    # Resolver nome humanizado do agente a partir da config
+    agent_display_name = agent_id
+    for platform_agents in config.get("agents", {}).values():
+        if agent_id in platform_agents:
+            agent_display_name = platform_agents[agent_id].get("name", agent_id)
+            break
 
     # Resolver diretório de trabalho (sandbox do agente).
     # O agente SEMPRE opera dentro de repo/<repo_id>; nunca no diretório da esteira.
@@ -132,6 +139,8 @@ def build_prompt(config: dict, task: dict) -> str:
     lines = []
 
     # ── Cabeçalho ──
+    lines.append(f"Você é: {agent_display_name}.")
+    lines.append("")
     lines.append(f"**Tarefa:** {title}")
     lines.append(f"**Etapa:** {col.get('name', col_id)}")
     lines.append(f"**Objetivo:** {col.get('target-prompt', '')}")
@@ -178,7 +187,7 @@ def build_prompt(config: dict, task: dict) -> str:
     lines.append("")
     lines.append("Realize o objetivo descrito acima. Ao concluir ou se houver bloqueio:")
     lines.append("")
-    lines.append(f"- Anote observações, dúvidas ou resumo em `{addcomment_file}` (assine com `— {agent_name}` no final)")
+    lines.append(f"- Anote observações, dúvidas ou resumo em `{addcomment_file}` (assine com `— {agent_display_name}` no final)")
     lines.append("")
 
     # ── Commit & Push (create / use / merge / create-merge) ──
