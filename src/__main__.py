@@ -1,6 +1,6 @@
 from src.core.log import log
 from src.core.config import check_config as validate_config, ConfigError, SSH_KEY_ENV
-from src.core.board import Board, PenaltyException
+from src.core.board import Board, PenaltyException, BoardAccessError
 from src.core.snapshot import Snapshot
 from src.core.change_queue import ChangeQueue, QUEUE_FILE
 from src.core.sync import sync_remote, detect_local_changes, apply_changes
@@ -377,7 +377,14 @@ def main():
     adapter = ADAPTERS[platform]()
     board = Board(adapter)
     board.connect(config)
-    
+
+    # Gate de permissões: não inicia a esteira sem poder operar o repositório.
+    try:
+        board.check_access(config)
+    except BoardAccessError as e:
+        log.error("Startup", f"Permissões insuficientes - esteira não iniciada: {e}")
+        raise SystemExit(1)
+
     board_full_sync(config)
     last_full_sync = datetime.now().date()
 

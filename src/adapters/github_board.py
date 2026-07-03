@@ -80,7 +80,7 @@ class GitHubBoardAdapter(BoardPort):
             self._throttle_cooldown = datetime.now() + timedelta(hours=1)
 
         if self._throttle_cooldown < datetime.now():
-            if self._throttle_value > 16:
+            if self._throttle_value > 1:
                 self._throttle_value //= 2
                 self._save_throttle()
                 log.info("GitHub", f"Throttle reduzido para {self._throttle_value}s (cooldown)")
@@ -473,8 +473,7 @@ class GitHubBoardAdapter(BoardPort):
             self._throttle()
             args = ["gh", "api", "-i", "graphql", "-f", f"query={query}"]
             for k, v in variables.items():
-                flag = "-F" if isinstance(v, (int, float, bool)) else "-f"
-                args += [flag, f"{k}={v}"]
+                args += self._field_arg(k, v)
 
             result = subprocess.run(args, capture_output=True, text=True)
             raw_output = result.stdout.strip()
@@ -572,6 +571,74 @@ class GitHubBoardAdapter(BoardPort):
             self._repo = self._repo.replace("git@github.com:", "").replace(".git", "")
         self._load_throttle()
         log.info("GitHub", f"Repositório: {self._repo} (throttle: {self._throttle_value}s)")
+
+    def check_access(self, config: dict) -> None:
+        """Valida acesso e permissão de escrita no repositório ANTES de rodar.
+
+        Usa chamadas diretas ao ``gh`` (sem passar por ``_gh``) para não acionar
+        o tratamento de rate limit/penalty durante a verificação de startup —
+        um 403 aqui significa "sem permissão", não "rate limit".
+
+        Levanta ``BoardAccessError`` quando:
+          - não há repositório configurado;
+          - o token não está autenticado;
+          - o repositório não existe ou é inacessível pelo token;
+          - o token não tem permissão de escrita (push/maintain/admin).
+        """
+        from src.core.board import BoardAccessError
+
+        if not self._repo:
+            raise BoardAccessError("Repositório não configurado em git.repo")
+
+        # 1. Usuário autenticado
+        who = subprocess.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True, text=True,
+        )
+        if who.returncode != 0:
+            raise BoardAccessError(
+                "Token do gh não autenticado ou inválido: "
+                + (who.stderr.strip() or "falha ao consultar /user")
+            )
+        login = who.stdout.strip()
+
+        # 2. Acesso e permissões no repositório
+        result = subprocess.run(
+            ["gh", "api", f"repos/{self._repo}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            err = result.stderr.strip() or result.stdout.strip()
+            raise BoardAccessError(
+                f"Sem acesso ao repositório '{self._repo}' como '{login}': {err}"
+            )
+
+        try:
+            data = json.loads(result.stdout)
+        except (ValueError, TypeError):
+            raise BoardAccessError(
+                f"Resposta inválida ao consultar repositório '{self._repo}'"
+            )
+
+        perms = data.get("permissions") or {}
+        can_write = bool(
+            perms.get("admin") or perms.get("maintain") or perms.get("push")
+        )
+        if not can_write:
+            level = next(
+                (name for name, key in (
+                    ("admin", "admin"), ("maintain", "maintain"),
+                    ("push", "push"), ("triage", "triage"), ("pull", "pull"),
+                ) if perms.get(key)),
+                "nenhuma",
+            )
+            raise BoardAccessError(
+                f"Token '{login}' não tem permissão de escrita em "
+                f"'{self._repo}' (nível atual: {level}). "
+                f"É necessário push, maintain ou admin."
+            )
+
+        log.info("GitHub", f"Permissões OK: '{login}' com escrita em '{self._repo}'")
 
     def sync_boards(self, boards: list[dict]) -> None:
         self._penalty_check()
@@ -894,13 +961,28 @@ class GitHubBoardAdapter(BoardPort):
         db_id = issue.get("fullDatabaseId")
         return int(db_id) if db_id else None
 
+    @staticmethod
+    def _field_arg(key, value) -> list[str]:
+        """Serializa um campo para o ``gh api``.
+
+        Usa ``-F`` (typed) para bool/int/float e ``-f`` (string) para o resto.
+        Booleanos são emitidos como os literais JSON ``true``/``false``: o gh só
+        reconhece a conversão mágica com literais minúsculos, então ``str(True)``
+        == ``"True"`` seria enviado como string e rejeitado pela API
+        (ex.: ``Invalid property /replace_parent: "True" is not of type boolean``).
+        """
+        if isinstance(value, bool):
+            return ["-F", f"{key}={'true' if value else 'false'}"]
+        if isinstance(value, (int, float)):
+            return ["-F", f"{key}={value}"]
+        return ["-f", f"{key}={value}"]
+
     def _api(self, method: str, path: str, **fields) -> str:
         """Chama a REST API via gh api (método + path + campos -f/-F)."""
         args = ["api", "-X", method,
                 "-H", "Accept: application/vnd.github+json", path]
         for k, v in fields.items():
-            flag = "-F" if isinstance(v, (int, float, bool)) else "-f"
-            args += [flag, f"{k}={v}"]
+            args += self._field_arg(k, v)
         return self._gh(*args)
 
     # ── Sub-issues (parent / children) ────────────────────────────────────────
