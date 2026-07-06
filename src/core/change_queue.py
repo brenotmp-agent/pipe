@@ -97,6 +97,10 @@ class ChangeQueue:
             self._write(items)
         return added
 
+    def size(self) -> int:
+        """Retorna a quantidade de itens na fila."""
+        return len(self._read())
+
     def getNext(self) -> ChangeItem | None:
         """Espia o item mais antigo da fila sem removê-lo (FIFO).
 

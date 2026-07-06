@@ -153,6 +153,11 @@ def board_full_sync(config: dict):
 def sync_board(config: dict) -> bool:
     """Sincroniza boards e retorna True se houve qualquer movimentação.
 
+    Boards são processados em ordem de prioridade (menor = mais prioritário).
+    Se um board apresenta mudanças (up ou down), processa-o e não avança para
+    os seguintes — garante que o board mais prioritário com trabalho pendente
+    seja resolvido primeiro.
+
     Penalty dentro do sync não propaga - apenas interrompe o sync do board
     afetado e prossegue para que tasks já disponíveis possam ser executadas.
     """
@@ -160,7 +165,13 @@ def sync_board(config: dict) -> bool:
     queue = ChangeQueue()
     had_changes = False
 
-    for board_id in board.board_ids(config):
+    boards_cfg = config["boards"]
+    boards_sorted = sorted(
+        ((bid, boards_cfg[bid]) for bid in board.board_ids(config)),
+        key=lambda x: x[1].get("priority", 999),
+    )
+
+    for board_id, _ in boards_sorted:
         try:
             sync_remote(board_id, board, queue)
         except PenaltyException:
@@ -177,6 +188,10 @@ def sync_board(config: dict) -> bool:
             apply_changes(board_id, board, queue, config)
         except PenaltyException:
             log.warning("Sync", f"[{board_id}] Penalty no apply - saindo do sync")
+            break
+
+        # Se houve mudanças neste board, não avança para os menos prioritários
+        if had_changes:
             break
 
     return had_changes
@@ -398,7 +413,8 @@ def main():
                 last_full_sync = today
 
             had_changes = sync_board(config)
-            if not had_changes:
+            queue = ChangeQueue()
+            if not had_changes and queue.size() == 0:
                 task = keep_task(config)
                 call_agent(config, task)
                 sleep_time(config, had_changes, task)
