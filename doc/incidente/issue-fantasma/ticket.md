@@ -255,15 +255,42 @@ Estimativa de esforço de engenharia (correções detalhadas na próxima etapa):
 
 ## Tarefas de Correção
 
-As correções serão formalizadas como tasks na etapa de análise de relatório, conforme priorização estabelecida na análise técnica.
+**Planejamento realizado por:** Isabela Gomes - Tech Lead
+**Data:** 2026-07-06
 
-### Prioridade de implementação
+As 5 tasks foram criadas no board `task`, coluna `backlog`, todas com `/parent #5` (esta issue).
 
-1. **Correção 3** (tratamento de erro) — Impede o loop infinito imediatamente.
-2. **Correção 2** (CONTEXT.md) — Previne que o agente cometa o erro.
-3. **Correção 1** (snapshot read-only) — Elimina a superfície de ataque.
-4. **Correção 4** (validação pós-agente) — Defesa em profundidade.
-5. **Correção 5** (isolamento de IDs) — Previne dano colateral entre boards.
+### Issues criadas
+
+| # | Task | Arquivo | Prioridade | Estimativa | agent_level |
+|---|------|---------|-----------|-----------|-------------|
+| T1 | Correção 3 — Tratamento de erro irrecuperável no sync | `correcao3-tratamento-erro-irrecuperavel-body.md` | 1 (máxima) | 2–4 h | low |
+| T2 | Correção 2 — CONTEXT.md gerado no startup | `correcao2-context-md-gerado-no-startup-body.md` | 2 | 4–8 h | medium |
+| T3 | Correção 1 — Snapshot como memória interna (read-only para agentes) | `correcao1-snapshot-readonly-para-agentes-body.md` | 3 | 4–8 h | medium |
+| T4 | Correção 4 — Validação pós-agente | `correcao4-validacao-pos-agente-body.md` | 4 | ~1 dia | medium |
+| T5 | Correção 5 — Isolamento de IDs entre boards | `correcao5-isolamento-ids-entre-boards-body.md` | 5 | 1–2 dias | high |
+
+### Ordem de execução e dependências
+
+As tasks foram criadas de forma independente (sem `/blocked_by` entre si), mas a ordem lógica de implementação deve respeitar a seguinte sequência:
+
+```
+T1 (Correção 3) → T2 (Correção 2) e T3 (Correção 1) [em paralelo] → T4 (Correção 4) → T5 (Correção 5)
+```
+
+**Justificativa:**
+- **T1 primeiro**: estanca o crash-loop imediatamente. Base estável para o restante.
+- **T2 e T3 em paralelo**: independentes entre si; T2 age no prompt/contexto, T3 age na lista de tools/paths — sem sobreposição.
+- **T4 após T2+T3**: a validação pós-agente só faz sentido depois que a superfície de ataque e o contexto estão definidos; precisamos saber o que é "estado esperado" para comparar.
+- **T5 por último**: maior custo, corrige dano colateral estrutural; as anteriores eliminam as condições que levam a este cenário.
+
+### Estimativa total
+
+| Cenário | Esforço |
+|---------|---------|
+| Somente T1 (estancar o crash) | ~½ dia |
+| T1 + T2 + T3 (prevenir reincidência) | ~2–3 dias |
+| Pacote completo (T1–T5) | ~4–6 dias |
 
 ### Detalhes de cada correção
 
