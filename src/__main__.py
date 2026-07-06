@@ -343,6 +343,14 @@ def call_agent(config: dict, task: dict | None):
     adapter.execute(params)
 
 
+def sleep_time(config: dict):
+    """Dorme pelo tempo configurado quando não há atividade."""
+    seconds = config["sleep"]
+    back_at = (datetime.now() + timedelta(seconds=seconds)).strftime('%H:%M:%S')
+    log.info("Sleep", f"Nenhuma atividade - dormindo {seconds}s (retorna às {back_at})")
+    time.sleep(seconds)
+
+
 _BANNER = r"""
  _____ ____ _____ _____ ___ ____      _
 | ____/ ___|_   _| ____|_ _|  _ \   / \
@@ -419,10 +427,7 @@ def main():
                 if index >= len(board_ids):
                     # Percorreu todos sem encontrar trabalho — sleep
                     index = 0
-                    seconds = config["sleep"]
-                    back_at = (datetime.now() + timedelta(seconds=seconds)).strftime('%H:%M:%S')
-                    log.info("Sleep", f"Nenhuma atividade - dormindo {seconds}s (retorna às {back_at})")
-                    time.sleep(seconds)
+                    sleep_time(config)
 
         except PenaltyException as e:
             back_at = (datetime.now() + timedelta(seconds=e.wait_seconds)).strftime('%H:%M:%S')
