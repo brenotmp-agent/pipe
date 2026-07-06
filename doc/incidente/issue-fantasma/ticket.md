@@ -1,21 +1,20 @@
 # Incidente — Issue Fantasma
 
-Status: Decisão de tratamento
-Owner: product
-Last updated: 2026-07-06
-
 ## Registro
+
+**Incidente ID:** 5
+**Status:** Em Tratamento
+**Owner:** product
+**Data de Abertura:** 2026-07-04 12:40
+**Last Updated:** 2026-07-06 11:41
 
 Este incidente foi reportado por uma esteira que está usando a pipe em seu desenvolvimento interno.
 
 ### Descrição
 
-- Data: 2026-07-04 12:40 (primeira ocorrência)
-- Reportado por: Breno (observação manual do terminal)
-
 A esteira agêntica v1.4.2 entra em loop infinito tentando fechar/atualizar a issue `#4` do board `story`, que **nunca existiu** no repositório GitHub. O erro se repete a cada ciclo de 10 minutos e não se resolve sozinho porque a fila de mudanças (`changeQueue.json`) retém o evento `delete-up` e o snapshot mantém o registro com `status: "delete-up"`.
 
-Erro GraphQL retornado:
+**Erro GraphQL retornado:**
 ```
 Could not resolve to an issue or pull request with the number of 4. (repository.issue)
 ```
@@ -32,7 +31,7 @@ Could not resolve to an issue or pull request with the number of 4. (repository.
 | 6 | Issues #1, #2, #3 fecham com sucesso (existem no GitHub como épicos) | `logs/2026-07-04.json` linhas 262-267 |
 | 7 | Snapshot atual mantém issues #4, #5, #6 com `"status": "delete-up"` | `.pipe/boards/story/snapshot.json` |
 
-Trace do terminal mostrando o loop:
+**Trace do terminal mostrando o loop:**
 ```
 13:16:22 [GitHub] [16s] #1 - Fechando issue
 13:16:39 [Sync] [story] delete-up #1 - issue fechada
@@ -59,9 +58,11 @@ Trace do terminal mostrando o loop:
 - **Épicos #1, #2, #3 receberam close indevido**: As issues reais do epic board foram fechadas erroneamente porque compartilhavam os IDs que o agente atribuiu às stories.
 - **Rate limit desnecessário**: 3 chamadas GraphQL desperdiçadas por ciclo (1 close + 1 list_issues + throttle).
 
+---
+
 ## Triagem
 
-**Triagem realizada por:** Isabela Gomes - Tech Lead
+**Triagem realizada por:** Isabela Gomes - Tech Lead  
 **Data:** 2026-07-06
 
 ### Confirmação do Problema
@@ -99,7 +100,7 @@ Justificativa:
 
 Não elevo para P2 porque: (a) apenas 1 usuário afetado; (b) workaround funcional; (c) sem SLA externo.
 
-### Workaround
+### Workaround Imediato
 
 Remover manualmente as entradas com IDs fantasmas do `snapshot.json` e do `changeQueue.json` e reabrir os épicos fechados indevidamente:
 
@@ -114,10 +115,13 @@ jq '.issues = [.issues[] | select(.id != "4" and .id != "5" and .id != "6")]' .p
 gh issue reopen 1 && gh issue reopen 2 && gh issue reopen 3
 ```
 
+---
+
 ## Análise Técnica
 
-**Analista:** Bruno Ferreira - Engenheiro de Software SR
+**Analista:** Bruno Ferreira - Engenheiro de Software SR  
 **Data:** 2026-07-06
+
 **Método:** investigação de código-fonte (AST + leitura direta), correlação de logs/traces do incidente e reconstrução do histórico de deploys via `git log`. Cada afirmação abaixo foi confirmada no código real do repositório.
 
 ### Sequência de eventos detalhada
@@ -150,16 +154,17 @@ gh issue reopen 1 && gh issue reopen 2 && gh issue reopen 3
 
 A falha não tem causa única: é a **combinação de três defeitos independentes** que, juntos, produzem o loop. Cada um foi localizado e verificado no código.
 
-**1. O agente tem acesso de escrita irrestrito ao estado interno da esteira**
+#### 1. O agente tem acesso de escrita irrestrito ao estado interno da esteira
 
 O `snapshot.json` (e o `changeQueue.json`) são memória interna, de propriedade exclusiva do `sync.py` / `change_queue.py`. Não há qualquer proteção contra escrita pelo agente:
+
 - `src/core/agent.py:97` — cada agente nativo é gerado com `"tools": ["*"]` (todas as ferramentas liberadas).
 - `src/adapters/kiro_cli_agent.py:52` — a execução usa `--trust-all-tools` (nenhuma confirmação/gate).
 - `src/core/agent.py` (`build_prompt`) entrega ao agente **caminhos absolutos** dentro de `.pipe/boards/<board>/<coluna>/`, que é exatamente a árvore onde vive o `snapshot.json` (`.pipe/boards/<board>/snapshot.json`). O agente descobre e escreve o arquivo sem nenhuma barreira.
 
-Observação: o gate de permissões introduzido em `7fe845f` (`check_access`) valida apenas se o **token do GitHub** tem escrita no repositório; não protege os arquivos de estado local. A superfície continua aberta.
+**Observação:** o gate de permissões introduzido em `7fe845f` (`check_access`) valida apenas se o **token do GitHub** tem escrita no repositório; não protege os arquivos de estado local. A superfície continua aberta.
 
-**2. O prefixo numérico do nome de arquivo é interpretado como ID de issue existente**
+#### 2. O prefixo numérico do nome de arquivo é interpretado como ID de issue existente
 
 `src/core/sync.py`, função `detect_local_changes`:
 
@@ -172,9 +177,10 @@ for body_file in board_dir.rglob("*-body.md"):
 
 Ao criar `4-login_e_logout-body.md`, o sync casa `^(\d+)-` e trata o arquivo como pertencente à issue #4 já existente → dispara `change-up`/`delete-up` em vez de `create-up`. O fluxo correto (criar arquivo `<slug>-body.md` sem ID, deixar o sync fazer `create-up` e atribuir o number real) nunca é acionado.
 
-**3. Ausência de tratamento de erro irrecuperável no apply de sync**
+#### 3. Ausência de tratamento de erro irrecuperável no apply de sync
 
 Quando a issue não existe, a cadeia de exceções é:
+
 - `src/adapters/github_board.py` `close_issue()` / `update_issue()` → `_gh()` → em retorno diferente de zero e que **não** é rate-limit nem offline, executa `raise Exception(...)` (`github_board.py:203`). "Could not resolve to an issue or pull request" não está nas listas de rate-limit/offline, então propaga.
 - `src/core/sync.py` `_apply_delete_up()` chama `board_obj.close_issue(...)` **sem try/except** → propaga.
 - `src/core/sync.py` `apply_changes()` só captura `PenaltyException` → o `Exception` genérico escapa.
@@ -217,50 +223,126 @@ Sim, imediato e já validado na triagem: remover as entradas fantasmas de `chang
 
 **Quanto custa corrigir?**
 Estimativa de esforço de engenharia (correções detalhadas na próxima etapa):
+
 - **Correção 3 — tratamento de erro irrecuperável** (`_apply_delete_up`/`_apply_change_up` tratam "Could not resolve..." descartando o evento e limpando o snapshot): **~2–4 h** (baixo risco, alto retorno — estanca o loop/crash imediatamente). *Menor mudança possível; prioridade máxima.*
 - **Correção 2 — `CONTEXT.md` gerado no startup** a partir do `pipe.yml`, proibindo manipulação de estado e ensinando nomeação sem ID: **~4–8 h** (previne reincidência).
 - **Correção 1 — snapshot/estado como read-only para o agente** (não expor path, lista de arquivos protegidos, restringir `tools`): **~4–8 h**.
 - **Correção 4 — validação pós-agente** (comparar mtime do snapshot, restaurar se alterado, renomear arquivos com prefixo numérico indevido): **~1 dia**.
 - **Correção 5 — isolamento de IDs entre boards** (validar que o number pertence ao board antes de operação destrutiva): **~1–2 dias** (requer consulta ao projeto associado; maior custo).
 
-Total aproximado: **~3–5 dias de dev** para o pacote completo. O loop/crash em produção pode ser estancado em **menos de meio dia** aplicando somente a Correção 3.
+**Total aproximado:** ~3–5 dias de dev para o pacote completo. O loop/crash em produção pode ser estancado em **menos de meio dia** aplicando somente a Correção 3.
 
-## Decisão de tratamento
+---
 
-**Decisão:** Opção 1 — Continuar tratando como incidente produtivo. A issue segue o fluxo do board de incidente.
+## Decisão de Tratamento
 
-**Motivos:**
+**Decisão tomada por:** Isabela Gomes - Tech Lead  
+**Data:** 2026-07-06
+
+**Opção escolhida:** Opção 1 — Continuar como incidente produtivo. A issue segue o fluxo do board de incidente.
+
+### Motivos
 
 1. **Bug de design confirmado e de escopo não trivial.** A análise técnica identificou causa raiz tripla com cinco correções de código interdependentes, estimativa de 3–5 dias de esforço e necessidade de validação em profundidade. Não se trata de uma correção pontual e isolada.
 
 2. **Risco ativo na base atual.** A remoção do `except Exception` amplo trocou "loop silencioso" por "crash-loop do processo". Sem as correções, qualquer nova execução do agente na coluna `criacao-stories` pode reinstaurar a condição de travamento com queda total da esteira — risco que justifica acompanhamento estruturado.
 
-3. **Dano colateral presente.** Issues reais (#1, #2, #3) foram fechadas indevidamente. Embora reversível, esse tipo de efeito colateral entre boards (espaço de IDs compartilhado no GitHub) exige correção (Correção 5) que vai além do problema imediato.
+3. **Dano colateral presente.** Issues reais (#1, #2, #3) foram fechadas indevidamente. Embora reversível, o espaço de IDs compartilhado no GitHub exige correção (Correção 5) que vai além do problema imediato.
 
-4. **Prevenção de reincidência requer múltiplas mudanças.** O workaround existente é paliativo. Sem as Correções 1, 2 e 4 (proteção de estado, CONTEXT.md, validação pós-agente), o padrão pode se repetir em outras execuções de agentes que manipulem arquivos de board.
+4. **Prevenção de reincidência requer múltiplas mudanças.** O workaround é paliativo. Sem as Correções 1, 2 e 4 (proteção de estado, CONTEXT.md, validação pós-agente), o padrão pode se repetir em outras execuções.
 
-**Não foi escolhida a Opção 2** (task de correção) porque o escopo de 5 correções com interdependências e necessidade de validação em múltiplas camadas não se enquadra em uma task simples de correção.
+---
 
-## Tarefas de correção
+## Tarefas de Correção
 
-As tarefas serão abertas e acompanhadas no fluxo de incidente:
+As correções serão formalizadas como tasks na etapa de análise de relatório, conforme priorização estabelecida na análise técnica.
 
-1. **[Prioridade 1] Correção 3** — Tratamento de erro irrecuperável em `_apply_delete_up` e `_apply_change_up`: detectar "Could not resolve to an issue or pull request", descartar o evento da fila e limpar o snapshot. Estanca o loop/crash imediatamente. Esforço: ~2–4 h.
+### Prioridade de implementação
 
-2. **[Prioridade 2] Correção 2** — Geração automática de `CONTEXT.md` no startup a partir do `pipe.yml`: proibir manipulação de `snapshot.json`/`changeQueue.json`/`throttle`; instruir criação de issues sem prefixo numérico. Esforço: ~4–8 h.
+1. **Correção 3** (tratamento de erro) — Impede o loop infinito imediatamente.
+2. **Correção 2** (CONTEXT.md) — Previne que o agente cometa o erro.
+3. **Correção 1** (snapshot read-only) — Elimina a superfície de ataque.
+4. **Correção 4** (validação pós-agente) — Defesa em profundidade.
+5. **Correção 5** (isolamento de IDs) — Previne dano colateral entre boards.
 
-3. **[Prioridade 3] Correção 1** — Tornar snapshot/estado interno inacessível ao agente: não expor paths no prompt, lista de arquivos protegidos, rever `tools: ["*"]` e `--trust-all-tools`. Esforço: ~4–8 h.
+### Detalhes de cada correção
 
-4. **[Prioridade 4] Correção 4** — Validação pós-agente: comparar mtime do snapshot pré/pós execução; restaurar se alterado; detectar e renomear arquivos com prefixo numérico indevido. Esforço: ~1 dia.
+#### Correção 1 — Snapshot como memória interna (read-only para agentes)
 
-5. **[Prioridade 5] Correção 5** — Isolamento de IDs entre boards: validar que o number pertence ao board correto antes de operação destrutiva. Esforço: ~1–2 dias.
+Tornar os snapshots auxiliares de memória exclusivamente internos:
+- Durante o processamento, usar apenas a informação em memória.
+- A cada alteração, salvar o novo estado no arquivo.
+- Ler o arquivo apenas na inicialização da aplicação.
+- **Proibir acesso ao snapshot pelo agente** — não informar o path no prompt e incluir na lista de arquivos protegidos.
 
-## Ação proposta
+#### Correção 2 — CONTEXT.md gerado no startup a partir do pipe.yml
 
-**Decisão tomada:** Opção 1 — Incidente produtivo. A issue permanece no board de incidente e segue o fluxo normal.
+No startup do serviço, gerar automaticamente o `CONTEXT.md` que:
+- Traduz as configurações do `pipe.yml` em instruções claras para o agente.
+- **Proíbe explicitamente** a manipulação dos arquivos `snapshot.json`, `changeQueue.json` e `throttle`.
+- **Obriga** a criação de issues sem o ID numérico no nome: apenas `<slug>-body.md`, `<slug>-history.md`, `<slug>-addcomment.md`.
+- **Ensina** o padrão correto de criação de branches.
+- Elimina ambiguidade — o agente recebe instruções derivadas da configuração real em vez de inferir comportamento.
 
-**Justificativa resumida:** O incidente apresenta causa raiz tripla (bug de design na interface agente ↔ esteira), risco ativo de crash-loop na base atual, dano colateral reversível em outros boards e necessidade de cinco correções interdependentes com esforço total estimado em ~3–5 dias de desenvolvimento. A complexidade e o risco contínuo não se enquadram em uma task de correção simples — o acompanhamento estruturado de incidente é o caminho adequado para garantir que todas as correções sejam implementadas, priorizadas e validadas corretamente.
+#### Correção 3 — Tratamento de erro irrecuperável no sync
 
-**Próxima etapa no fluxo:** Análise de relatório — onde as correções identificadas serão detalhadas e as tarefas de implementação serão formalizadas.
+Adicionar tratamento específico em `_apply_delete_up` e `_apply_change_up` para erros de "issue inexistente":
 
-**Não serão criadas issues adicionais nesta etapa.** Todas as correções serão tratadas dentro do fluxo do incidente atual, com tasks de implementação abertas na etapa subsequente conforme a priorização definida acima.
+```python
+def _apply_delete_up(board_id: str, item: ChangeItem, board_obj: Board):
+    """Fecha issue no board (arquivo local já foi removido)."""
+    try:
+        board_obj.close_issue(board_id, item.id)
+    except Exception as e:
+        if "Could not resolve to an issue or pull request" in str(e):
+            log.warning("Sync", f"[{board_id}] #{item.id} não existe no GitHub - "
+                       "removendo do snapshot (issue fantasma)")
+            # Issue não existe — limpar estado e seguir
+            snap = Snapshot(board_id).load()
+            snap.issues = [i for i in snap.issues if str(i.get("id")) != str(item.id)]
+            snap.save()
+            return
+        raise
+
+    snap = Snapshot(board_id).load()
+    snap.issues = [i for i in snap.issues if str(i.get("id")) != str(item.id)]
+    snap.save()
+    log.info("Sync", f"[{board_id}] delete-up #{item.id} - issue fechada",
+             issue_id=item.id)
+```
+
+#### Correção 4 — Validação pós-agente
+
+Após a execução do agente, antes de devolver o controle ao loop:
+- Comparar mtime do `snapshot.json` pré/pós execução.
+- Se foi alterado pelo agente, **restaurar o snapshot anterior** e logar warning.
+- Detectar arquivos com prefixo numérico criados em boards onde o ID não existia no snapshot pré-execução — logar warning e renomear removendo o prefixo numérico.
+
+#### Correção 5 — Isolamento de IDs entre boards
+
+O repositório GitHub compartilha o espaço de números de issues entre todos os boards (epic, story, task, etc.). Ao fazer operações como `close_issue`, validar que o ID pertence ao board correto consultando o projeto associado antes de executar a ação destrutiva.
+
+---
+
+## Ação Proposta
+
+**Etapa:** Execução de Tratamento
+
+**Executado por:** Diego Santos - Analista de Operações  
+**Data:** 2026-07-06 11:41
+
+**Ação executada:** Criação deste arquivo (`doc/incidente/issue-fantasma/ticket.md`) no repositório, consolidando o registro completo do incidente (descrição, triagem, análise técnica, decisão de tratamento, tarefas de correção e ação proposta), conforme decisão de Isabela Gomes (Tech Lead) de manter o incidente como produtivo no board de incidentes.
+
+**Próximos passos:** O incidente segue para análise de relatório e formalização de tasks, conforme o fluxo do board de incidentes.
+
+---
+
+## Histórico de Atualizações
+
+| Data | Responsável | Evento |
+|------|-------------|--------|
+| 2026-07-04 12:40 | Breno | Incidente reportado |
+| 2026-07-06 13:04 | Isabela Gomes | Triagem concluída (P3 - Média) |
+| 2026-07-06 13:59 | Bruno Ferreira | Análise técnica concluída |
+| 2026-07-06 14:10 | Isabela Gomes | Decisão de tratamento (Incidente produtivo) |
+| 2026-07-06 11:41 | Diego Santos | Execução de tratamento — Documentação criada |
