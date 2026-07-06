@@ -262,13 +262,13 @@ As 5 tasks foram criadas no board `task`, coluna `backlog`, todas com `/parent #
 
 ### Issues criadas
 
-| # | Task | Arquivo | Prioridade | Estimativa | agent_level |
-|---|------|---------|-----------|-----------|-------------|
-| T1 | Correção 3 — Tratamento de erro irrecuperável no sync | `correcao3-tratamento-erro-irrecuperavel-body.md` | 1 (máxima) | 2–4 h | low |
-| T2 | Correção 2 — CONTEXT.md gerado no startup | `correcao2-context-md-gerado-no-startup-body.md` | 2 | 4–8 h | medium |
-| T3 | Correção 1 — Snapshot como memória interna (read-only para agentes) | `correcao1-snapshot-readonly-para-agentes-body.md` | 3 | 4–8 h | medium |
-| T4 | Correção 4 — Validação pós-agente | `correcao4-validacao-pos-agente-body.md` | 4 | ~1 dia | medium |
-| T5 | Correção 5 — Isolamento de IDs entre boards | `correcao5-isolamento-ids-entre-boards-body.md` | 5 | 1–2 dias | high |
+| Issue | Task | Prioridade | Estimativa | agent_level |
+|-------|------|-----------|-----------|-------------|
+| #6 | Correção 3 — Tratamento de erro irrecuperável no sync | 1 (máxima) | 2–4 h | low |
+| #7 | Correção 2 — CONTEXT.md gerado no startup | 2 | 4–8 h | medium |
+| #8 | Correção 1 — Snapshot como memória interna (read-only para agentes) | 3 | 4–8 h | medium |
+| #9 | Correção 4 — Validação pós-agente | 4 | ~1 dia | medium |
+| #10 | Correção 5 — Isolamento de IDs entre boards | 5 | 1–2 dias | high |
 
 ### Ordem de execução e dependências
 
@@ -373,3 +373,4 @@ O repositório GitHub compartilha o espaço de números de issues entre todos os
 | 2026-07-06 13:59 | Bruno Ferreira | Análise técnica concluída |
 | 2026-07-06 14:10 | Isabela Gomes | Decisão de tratamento (Incidente produtivo) |
 | 2026-07-06 11:41 | Diego Santos | Execução de tratamento — Documentação criada |
+| 2026-07-06 15:22 | Isabela Gomes | Planejamento técnico — 5 tasks criadas no board (issues #6–#10) |
