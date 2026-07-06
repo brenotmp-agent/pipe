@@ -838,17 +838,33 @@ class GitHubBoardAdapter(BoardPort):
         self._penalty_check()
         log.info("GitHub", f"[{self._throttle_value}s] {board_id} - Criando issue '{title}'",
                  operation="create_issue", board_id=board_id, title=title)
+        # 'gh issue create' NÃO suporta --json; ele imprime a URL da issue
+        # criada no stdout (ex.: https://github.com/owner/repo/issues/42).
         result = self._gh("issue", "create", "--repo", self._repo,
-                          "--title", title, "--body", body, "--json", "number,title,body,updatedAt")
-        data = json.loads(result)
-        issue_id = str(data["number"])
+                          "--title", title, "--body", body)
+        issue_url = result.strip().splitlines()[-1].strip() if result.strip() else ""
+        issue_id = issue_url.rstrip("/").split("/")[-1]
+        if not issue_id.isdigit():
+            raise Exception(
+                f"Não foi possível extrair o número da issue da saída de 'gh issue create': {result!r}"
+            )
+        # Buscar node_id e updatedAt em uma única query GraphQL.
+        info = self._gql(
+            "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){id updatedAt}}}",
+            owner=self._repo.split("/")[0],
+            repo=self._repo.split("/")[1],
+            number=int(issue_id),
+        )
+        issue_node = (info.get("repository") or {}).get("issue") or {}
+        node_id = issue_node.get("id")
+        updated_at = issue_node.get("updatedAt", "")
         # Adicionar ao project e mover para coluna
         meta = self._board_meta(board_id)
         # Adicionar issue ao project
         add_data = self._gql(
             "mutation($pid:ID!,$contentId:ID!){addProjectV2ItemById(input:{projectId:$pid,contentId:$contentId}){item{id}}}",
             pid=meta["project_id"],
-            contentId=self._get_issue_node_id(issue_id),
+            contentId=node_id,
         )
         item_id = add_data["addProjectV2ItemById"]["item"]["id"]
         # Mover para coluna correta
@@ -861,7 +877,7 @@ class GitHubBoardAdapter(BoardPort):
             )
         return Issue(
             id=issue_id, title=title, body=body, column=column,
-            updated_at=data.get("updatedAt", ""),
+            updated_at=updated_at,
         )
 
     def _get_issue_node_id(self, issue_id: str) -> str:
