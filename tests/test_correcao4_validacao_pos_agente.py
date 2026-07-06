@@ -9,13 +9,11 @@ Cobrem os 4 cenários da tabela da issue:
 | Agente cria arquivo sem prefixo numérico | Nenhuma ação (comportamento correto) |
 | Agente cria arquivo com prefixo numérico rastreado | Nenhuma ação (arquivo legítimo) |
 
-A implementação ancora-se em dois utilitários que serão adicionados ao projeto:
-
-  - `src.core.agent_guard.snapshot_guard(board_id, backup_path)`
-    Context manager que captura mtime + backup antes e restaura se modificado.
-
-  - `src.core.agent_guard.fix_phantom_files(board_id, col_id, known_ids)`
-    Varre a coluna e renomeia arquivos com prefixo numérico não rastreado.
+Estrutura:
+  - TestSnapshotGuard, TestFixPhantomFiles, TestCallAgentGuardIntegration,
+    TestPerformanceGuard — testes de contrato usando helpers internos.
+  - TestAgentGuardUnit — testes que exercitam diretamente os utilitários e a
+    classe AgentGuard de produção (src.core.agent_guard).
 
 Os testes usam monkeypatch + tmp_path para isolar inteiramente o filesystem.
 """
@@ -24,6 +22,7 @@ import json
 import re
 import shutil
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -495,3 +494,203 @@ class TestPerformanceGuard:
         assert ids == {"1", "2"}
         assert None not in ids
         assert "None" not in ids
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Testes de produção: exercitam diretamente src.core.agent_guard
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAgentGuardUnit:
+    """Testes contra os utilitários e a classe AgentGuard de produção."""
+
+    # ── utilitários ──────────────────────────────────────────────────────────
+
+    def test_snapshot_mtime_retorna_float(self):
+        """snapshot_mtime retorna float quando o arquivo existe."""
+        from src.core.agent_guard import snapshot_mtime
+        board_id = "task"
+        _make_snapshot(board_id, [{"id": "1", "column": "col1", "status": "ok"}])
+        mtime = snapshot_mtime(board_id)
+        assert isinstance(mtime, float)
+
+    def test_snapshot_mtime_retorna_none_sem_arquivo(self):
+        """snapshot_mtime retorna None quando snapshot não existe."""
+        from src.core.agent_guard import snapshot_mtime
+        assert snapshot_mtime("board_inexistente") is None
+
+    def test_snapshot_known_ids_extrai_ids(self):
+        """snapshot_known_ids extrai corretamente IDs do snapshot."""
+        from src.core.agent_guard import snapshot_known_ids
+        board_id = "task"
+        _make_snapshot(board_id, [
+            {"id": "10", "column": "col1"},
+            {"id": "20", "column": "col1"},
+            {"id": None, "column": "col1"},   # sem id — deve ser ignorado
+        ])
+        ids = snapshot_known_ids(board_id)
+        assert ids == {"10", "20"}
+        assert "None" not in ids
+
+    def test_snapshot_known_ids_vazio_sem_arquivo(self):
+        """snapshot_known_ids retorna set vazio quando snapshot não existe."""
+        from src.core.agent_guard import snapshot_known_ids
+        assert snapshot_known_ids("board_sem_arquivo") == set()
+
+    def test_fix_phantom_files_renomeia_nao_rastreado(self):
+        """fix_phantom_files renomeia arquivo com prefixo não rastreado."""
+        from src.core.agent_guard import fix_phantom_files
+        board_id = "task"
+        col_id = "dev"
+        known_ids = {"1"}
+        col_dir = _make_column_dir(board_id, col_id)
+        (col_dir / "42-feature-body.md").write_text("# F", encoding="utf-8")
+
+        renamed = fix_phantom_files(board_id, col_id, known_ids)
+
+        assert len(renamed) == 1
+        assert renamed[0] == ("42-feature-body.md", "feature-body.md")
+        assert (col_dir / "feature-body.md").exists()
+        assert not (col_dir / "42-feature-body.md").exists()
+
+    def test_fix_phantom_files_preserva_rastreado(self):
+        """fix_phantom_files não toca em arquivo com prefixo rastreado."""
+        from src.core.agent_guard import fix_phantom_files
+        board_id = "task"
+        col_id = "dev"
+        known_ids = {"42"}
+        col_dir = _make_column_dir(board_id, col_id)
+        (col_dir / "42-feature-body.md").write_text("# F", encoding="utf-8")
+
+        renamed = fix_phantom_files(board_id, col_id, known_ids)
+
+        assert renamed == []
+        assert (col_dir / "42-feature-body.md").exists()
+
+    def test_fix_phantom_files_preserva_sem_prefixo(self):
+        """fix_phantom_files não toca em arquivo sem prefixo numérico."""
+        from src.core.agent_guard import fix_phantom_files
+        board_id = "task"
+        col_id = "dev"
+        col_dir = _make_column_dir(board_id, col_id)
+        (col_dir / "slug-body.md").write_text("# S", encoding="utf-8")
+
+        renamed = fix_phantom_files(board_id, col_id, set())
+
+        assert renamed == []
+        assert (col_dir / "slug-body.md").exists()
+
+    def test_fix_phantom_files_coluna_inexistente(self):
+        """fix_phantom_files retorna [] sem erro quando coluna não existe."""
+        from src.core.agent_guard import fix_phantom_files
+        renamed = fix_phantom_files("board_x", "col_inexistente", {"1"})
+        assert renamed == []
+
+    # ── AgentGuard: context manager ──────────────────────────────────────────
+
+    def test_agent_guard_agente_bom(self):
+        """AgentGuard não altera nada quando agente não corrompe estado."""
+        from src.core.agent_guard import AgentGuard
+        board_id = "task"
+        col_id = "dev"
+        _make_snapshot(board_id, [{"id": "1", "column": col_id, "status": "ok"}])
+        _make_column_dir(board_id, col_id)
+
+        with AgentGuard(board_id, col_id) as guard:
+            pass  # agente que não faz nada no filesystem
+
+        assert not guard.snapshot_restored
+        assert guard.renamed_files == []
+
+    def test_agent_guard_restaura_snapshot_modificado(self):
+        """AgentGuard restaura snapshot quando agente o sobrescreve."""
+        from src.core.agent_guard import AgentGuard
+        board_id = "task"
+        col_id = "dev"
+        original = [{"id": "1", "column": col_id, "status": "ok"}]
+        snap_path = _make_snapshot(board_id, original)
+        _make_column_dir(board_id, col_id)
+
+        with AgentGuard(board_id, col_id) as guard:
+            time.sleep(0.01)  # garante mtime diferente
+            snap_path.write_text(
+                json.dumps({"board": {}, "issues": [{"id": "FANTASMA"}]}),
+                encoding="utf-8",
+            )
+
+        assert guard.snapshot_restored is True
+        restored = json.loads(snap_path.read_text(encoding="utf-8"))
+        assert restored["issues"] == original
+
+    def test_agent_guard_renomeia_arquivo_fantasma(self):
+        """AgentGuard renomeia arquivo fantasma criado pelo agente."""
+        from src.core.agent_guard import AgentGuard
+        board_id = "task"
+        col_id = "dev"
+        _make_snapshot(board_id, [{"id": "1", "column": col_id, "status": "ok"}])
+        col_dir = _make_column_dir(board_id, col_id)
+
+        with AgentGuard(board_id, col_id) as guard:
+            (col_dir / "99-intruso-body.md").write_text("# X", encoding="utf-8")
+
+        assert not guard.snapshot_restored
+        assert len(guard.renamed_files) == 1
+        assert guard.renamed_files[0] == ("99-intruso-body.md", "intruso-body.md")
+        assert (col_dir / "intruso-body.md").exists()
+        assert not (col_dir / "99-intruso-body.md").exists()
+
+    def test_agent_guard_dupla_corrupcao(self):
+        """AgentGuard corrige snapshot E arquivo fantasma simultaneamente."""
+        from src.core.agent_guard import AgentGuard
+        board_id = "task"
+        col_id = "dev"
+        original = [{"id": "1", "column": col_id, "status": "ok"}]
+        snap_path = _make_snapshot(board_id, original)
+        col_dir = _make_column_dir(board_id, col_id)
+
+        with AgentGuard(board_id, col_id) as guard:
+            time.sleep(0.01)
+            snap_path.write_text(json.dumps({"board": {}, "issues": []}), encoding="utf-8")
+            (col_dir / "77-bug-body.md").write_text("# Bug", encoding="utf-8")
+
+        assert guard.snapshot_restored is True
+        assert len(guard.renamed_files) == 1
+        restored = json.loads(snap_path.read_text(encoding="utf-8"))
+        assert restored["issues"] == original
+
+    def test_agent_guard_backup_removido_mesmo_com_excecao(self, tmp_path):
+        """AgentGuard limpa backup mesmo que exceção ocorra durante execução."""
+        from src.core.agent_guard import AgentGuard
+        board_id = "task"
+        col_id = "dev"
+        _make_snapshot(board_id, [])
+        _make_column_dir(board_id, col_id)
+
+        guard = AgentGuard(board_id, col_id)
+        guard.before()
+        backup = guard._backup
+
+        try:
+            raise RuntimeError("falha simulada")
+        except RuntimeError:
+            pass
+        finally:
+            guard.after()
+
+        # Backup deve ter sido removido no after()
+        assert backup is None or not backup.exists()
+
+    def test_agent_guard_nao_usa_rede(self):
+        """AgentGuard não faz nenhuma chamada de rede (filesystem apenas)."""
+        from src.core.agent_guard import AgentGuard
+        board_id = "task"
+        col_id = "dev"
+        _make_snapshot(board_id, [{"id": "1", "column": col_id, "status": "ok"}])
+        _make_column_dir(board_id, col_id)
+
+        with patch("subprocess.run") as mock_sub, \
+             patch("urllib.request.urlopen") as mock_url:
+            with AgentGuard(board_id, col_id):
+                pass
+
+        mock_sub.assert_not_called()
+        mock_url.assert_not_called()

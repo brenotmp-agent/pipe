@@ -340,7 +340,10 @@ def call_agent(config: dict, task: dict | None):
     )
 
     adapter = KiroCliAgent()
-    adapter.execute(params)
+
+    from src.core.agent_guard import AgentGuard
+    with AgentGuard(board_id, col_id):
+        adapter.execute(params)
 
 
 def sleep_time(config: dict):
