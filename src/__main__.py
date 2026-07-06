@@ -180,8 +180,9 @@ def sync_board(config: dict) -> bool:
 
         detect_local_changes(board_id, queue)
 
-        # Se há itens na fila, houve movimentação
-        if queue.getNext() is not None:
+        # Se há itens na fila para este board, houve movimentação
+        board_had_changes = queue.has_board(board_id)
+        if board_had_changes:
             had_changes = True
 
         try:
@@ -191,7 +192,7 @@ def sync_board(config: dict) -> bool:
             break
 
         # Se houve mudanças neste board, não avança para os menos prioritários
-        if had_changes:
+        if board_had_changes:
             break
 
     return had_changes
