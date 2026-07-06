@@ -150,58 +150,53 @@ def board_full_sync(config: dict):
     log.info("Board", f"{total} mudança(s) remota(s) adicionada(s) à fila")
 
 
-def sync_board(config: dict) -> bool:
-    """Sincroniza boards e retorna True se houve qualquer movimentação.
+def get_board_ids(config: dict) -> list[str]:
+    """Retorna lista de board_ids ordenados por prioridade (menor = mais prioritário)."""
+    boards_cfg = config["boards"]
+    return sorted(
+        (bid for bid in boards_cfg if bid != "platform"),
+        key=lambda bid: boards_cfg[bid].get("priority", 999),
+    )
 
-    Duas fases:
-    1. Descoberta — itera boards por prioridade (menor = mais prioritário).
-       Se um board apresenta mudanças (up ou down), para e não avança para os
-       seguintes (economiza chamadas API).
-    2. Processamento — consome toda a fila global (qualquer board).
 
-    Penalty dentro do sync não propaga - apenas interrompe o sync do board
-    afetado e prossegue para que tasks já disponíveis possam ser executadas.
+def sync_board(board_id: str, config: dict) -> bool:
+    """Descobre mudanças (remotas e locais) de um único board.
+
+    Retorna True se houve qualquer mudança detectada para este board.
+    Penalty não propaga — apenas interrompe e retorna o que já descobriu.
     """
     global board
     queue = ChangeQueue()
-    had_changes = False
 
-    boards_cfg = config["boards"]
-    boards_sorted = sorted(
-        ((bid, boards_cfg[bid]) for bid in board.board_ids(config)),
-        key=lambda x: x[1].get("priority", 999),
-    )
+    try:
+        sync_remote(board_id, board, queue)
+    except PenaltyException:
+        log.warning("Sync", f"[{board_id}] Penalty no sync remoto")
 
-    # Fase 1: Descoberta por board (para no primeiro com mudanças)
-    for board_id, _ in boards_sorted:
-        try:
-            sync_remote(board_id, board, queue)
-        except PenaltyException:
-            log.warning("Sync", f"[{board_id}] Penalty no sync remoto - pulando board")
-            continue
+    detect_local_changes(board_id, queue)
 
-        detect_local_changes(board_id, queue)
-
-        if queue.has_board(board_id):
-            had_changes = True
-            break
-
-    # Fase 2: Processamento global da fila (todos os boards)
-    if queue.size() > 0:
-        had_changes = True
-        try:
-            apply_changes(board, queue, config)
-        except PenaltyException:
-            log.warning("Sync", "Penalty no apply - saindo do sync")
-
-    return had_changes
+    return queue.has_board(board_id)
 
 
-def keep_task(config: dict) -> dict | None:
-    """Seleciona a próxima tarefa elegível para execução.
+def process_queue(config: dict):
+    """Consome toda a fila de mudanças (qualquer board).
+
+    Penalty não propaga — interrompe e retorna para o próximo ciclo.
+    """
+    global board
+    queue = ChangeQueue()
+    if queue.size() == 0:
+        return
+    try:
+        apply_changes(board, queue, config)
+    except PenaltyException:
+        log.warning("Sync", "Penalty no process_queue")
+
+
+def keep_task(board_id: str, config: dict) -> dict | None:
+    """Seleciona a próxima tarefa elegível no board indicado.
 
     Lógica:
-    - Boards ordenados por prioridade (menor = mais prioritário)
     - Issues ordenadas por created_at (mais antiga primeiro)
     - Se issue está em 'todo', faz auto-advance local e retorna None (espera sync)
     - Elegível se: status=='ok', coluna tem 'agent', coluna tem 'change.advance'
@@ -209,56 +204,52 @@ def keep_task(config: dict) -> dict | None:
     - /need_human ou /blocked_by no body → bloqueada
     """
     boards_cfg = config["boards"]
-    boards_sorted = sorted(
-        ((bid, bcfg) for bid, bcfg in boards_cfg.items() if bid != "platform"),
-        key=lambda x: x[1].get("priority", 999),
-    )
+    board_cfg = boards_cfg[board_id]
 
-    for board_id, board_cfg in boards_sorted:
-        snap = Snapshot(board_id).load()
-        columns = board_cfg.get("columns", {})
-        todo_col = board_cfg.get("todo")
-        issues = [i for i in snap.issues if i.get("id") and i.get("status") == "ok"]
+    snap = Snapshot(board_id).load()
+    columns = board_cfg.get("columns", {})
+    todo_col = board_cfg.get("todo")
+    issues = [i for i in snap.issues if i.get("id") and i.get("status") == "ok"]
 
-        # parallel:false → bloquear auto-advance se issue ativa fora de todo/terminais
-        block_auto_advance = False
-        if board_cfg.get("parallel") is False:
-            terminal = {col_id for col_id, col in columns.items() if col.get("archive")}
-            inactive = (terminal | {todo_col}) if todo_col else terminal
-            block_auto_advance = any(i["column"] not in inactive for i in issues)
+    # parallel:false → bloquear auto-advance se issue ativa fora de todo/terminais
+    block_auto_advance = False
+    if board_cfg.get("parallel") is False:
+        terminal = {col_id for col_id, col in columns.items() if col.get("archive")}
+        inactive = (terminal | {todo_col}) if todo_col else terminal
+        block_auto_advance = any(i["column"] not in inactive for i in issues)
 
-        # Ordenar por created_at (campo pode não existir)
-        issues.sort(key=lambda i: i.get("created_at") or i.get("updated_at") or "")
+    # Ordenar por created_at (campo pode não existir)
+    issues.sort(key=lambda i: i.get("created_at") or i.get("updated_at") or "")
 
-        for issue in issues:
-            col_id = issue["column"]
+    for issue in issues:
+        col_id = issue["column"]
 
-            # Auto-advance do todo
-            if todo_col and col_id == todo_col:
-                if block_auto_advance:
-                    continue
-                advance_col = columns.get(todo_col, {}).get("change", {}).get("advance")
-                if advance_col:
-                    _auto_advance(board_id, issue, advance_col, snap)
-                    return None
+        # Auto-advance do todo
+        if todo_col and col_id == todo_col:
+            if block_auto_advance:
                 continue
+            advance_col = columns.get(todo_col, {}).get("change", {}).get("advance")
+            if advance_col:
+                _auto_advance(board_id, issue, advance_col, snap)
+                return None
+            continue
 
-            col = columns.get(col_id, {})
-            if not col.get("agent"):
-                continue
-            if not col.get("change", {}).get("advance"):
-                continue
-            if _is_blocked(issue):
-                continue
+        col = columns.get(col_id, {})
+        if not col.get("agent"):
+            continue
+        if not col.get("change", {}).get("advance"):
+            continue
+        if _is_blocked(issue):
+            continue
 
-            log.info("KeepTask", f"[{board_id}] #{issue['id']} selecionada em '{col_id}'")
-            return {
-                "board_id": board_id,
-                "issue": issue,
-                "column": col,
-                "col_id": col_id,
-                "board": board_cfg,
-            }
+        log.info("KeepTask", f"[{board_id}] #{issue['id']} selecionada em '{col_id}'")
+        return {
+            "board_id": board_id,
+            "issue": issue,
+            "column": col,
+            "col_id": col_id,
+            "board": board_cfg,
+        }
 
     return None
 
@@ -352,20 +343,6 @@ def call_agent(config: dict, task: dict | None):
     adapter.execute(params)
 
 
-def sleep_time(config: dict, had_changes: bool, task: dict | None):
-    """Dorme pelo tempo configurado quando não há atividade.
-
-    Ativa sleep apenas se sync_board não movimentou nada E keep_task não
-    encontrou tarefa elegível.
-    """
-    if had_changes or task is not None:
-        return
-    seconds = config["sleep"]
-    back_at = (datetime.now() + timedelta(seconds=seconds)).strftime('%H:%M:%S')
-    log.info("Sleep", f"Nenhuma atividade - dormindo {seconds}s (retorna às {back_at})")
-    time.sleep(seconds)
-
-
 _BANNER = r"""
  _____ ____ _____ _____ ___ ____      _
 | ____/ ___|_   _| ____|_ _|  _ \   / \
@@ -403,6 +380,10 @@ def main():
     board_full_sync(config)
     last_full_sync = datetime.now().date()
 
+    # Array fixo de boards ordenados por prioridade
+    board_ids = get_board_ids(config)
+    index = 0
+
     log.info("Pipe", "Esteira agêntica iniciada")
     running = True
     while running:
@@ -412,16 +393,40 @@ def main():
                 board_full_sync(config)
                 last_full_sync = today
 
-            had_changes = sync_board(config)
+            current_board = board_ids[index]
+
+            # Fase 1: Descoberta no board atual
+            had_changes = sync_board(current_board, config)
+
+            # Fase 2: Processamento global da fila
+            process_queue(config)
+
+            # Se houve mudanças ou fila ainda tem itens, volta ao início
             queue = ChangeQueue()
-            if not had_changes and queue.size() == 0:
-                task = keep_task(config)
+            if had_changes or queue.size() > 0:
+                index = 0
+                continue
+
+            # Sem mudanças e fila vazia: buscar tarefa no board atual
+            task = keep_task(current_board, config)
+
+            if task:
                 call_agent(config, task)
-                sleep_time(config, had_changes, task)
+                index = 0
+            else:
+                # Nenhuma tarefa neste board, avança para o próximo
+                index += 1
+                if index >= len(board_ids):
+                    # Percorreu todos sem encontrar trabalho — sleep
+                    index = 0
+                    seconds = config["sleep"]
+                    back_at = (datetime.now() + timedelta(seconds=seconds)).strftime('%H:%M:%S')
+                    log.info("Sleep", f"Nenhuma atividade - dormindo {seconds}s (retorna às {back_at})")
+                    time.sleep(seconds)
+
         except PenaltyException as e:
-            # Penalty escapou do sync (board_full_sync) - não há tasks locais, esperar
             back_at = (datetime.now() + timedelta(seconds=e.wait_seconds)).strftime('%H:%M:%S')
-            log.warning("Pipe", f"Penalty (pré-sync) - aguardando até {back_at}")
+            log.warning("Pipe", f"Penalty - aguardando até {back_at}")
             time.sleep(e.wait_seconds)
         except KeyboardInterrupt:
             log.info("Pipe", "Interrompido pelo usuário")
