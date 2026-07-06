@@ -351,13 +351,14 @@ def detect_local_changes(board_id: str, queue: ChangeQueue):
 # apply_changes - persiste mudanças da fila
 # ══════════════════════════════════════════════════════════════════════════════
 
-def apply_changes(board_id: str, board_obj: Board, queue: ChangeQueue, config: dict = None):
-    """Consome a fila e aplica mudanças. Para no primeiro PenaltyException."""
+def apply_changes(board_obj: Board, queue: ChangeQueue, config: dict = None):
+    """Consome toda a fila e aplica mudanças. Para no primeiro PenaltyException."""
     while True:
         item = queue.getNext()
-        if not item or item.board != board_id:
+        if not item:
             return
 
+        board_id = item.board
         try:
             if item.event == SyncEvent.CREATE_UP.value:
                 _apply_create_up(board_id, item, board_obj, queue)

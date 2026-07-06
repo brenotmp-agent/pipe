@@ -153,10 +153,11 @@ def board_full_sync(config: dict):
 def sync_board(config: dict) -> bool:
     """Sincroniza boards e retorna True se houve qualquer movimentação.
 
-    Boards são processados em ordem de prioridade (menor = mais prioritário).
-    Se um board apresenta mudanças (up ou down), processa-o e não avança para
-    os seguintes — garante que o board mais prioritário com trabalho pendente
-    seja resolvido primeiro.
+    Duas fases:
+    1. Descoberta — itera boards por prioridade (menor = mais prioritário).
+       Se um board apresenta mudanças (up ou down), para e não avança para os
+       seguintes (economiza chamadas API).
+    2. Processamento — consome toda a fila global (qualquer board).
 
     Penalty dentro do sync não propaga - apenas interrompe o sync do board
     afetado e prossegue para que tasks já disponíveis possam ser executadas.
@@ -171,6 +172,7 @@ def sync_board(config: dict) -> bool:
         key=lambda x: x[1].get("priority", 999),
     )
 
+    # Fase 1: Descoberta por board (para no primeiro com mudanças)
     for board_id, _ in boards_sorted:
         try:
             sync_remote(board_id, board, queue)
@@ -180,20 +182,17 @@ def sync_board(config: dict) -> bool:
 
         detect_local_changes(board_id, queue)
 
-        # Se há itens na fila para este board, houve movimentação
-        board_had_changes = queue.has_board(board_id)
-        if board_had_changes:
+        if queue.has_board(board_id):
             had_changes = True
+            break
 
+    # Fase 2: Processamento global da fila (todos os boards)
+    if queue.size() > 0:
+        had_changes = True
         try:
-            apply_changes(board_id, board, queue, config)
+            apply_changes(board, queue, config)
         except PenaltyException:
-            log.warning("Sync", f"[{board_id}] Penalty no apply - saindo do sync")
-            break
-
-        # Se houve mudanças neste board, não avança para os menos prioritários
-        if board_had_changes:
-            break
+            log.warning("Sync", "Penalty no apply - saindo do sync")
 
     return had_changes
 
