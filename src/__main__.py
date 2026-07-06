@@ -398,9 +398,10 @@ def main():
                 last_full_sync = today
 
             had_changes = sync_board(config)
-            task = keep_task(config)
-            call_agent(config, task)
-            sleep_time(config, had_changes, task)
+            if not had_changes:
+                task = keep_task(config)
+                call_agent(config, task)
+                sleep_time(config, had_changes, task)
         except PenaltyException as e:
             # Penalty escapou do sync (board_full_sync) - não há tasks locais, esperar
             back_at = (datetime.now() + timedelta(seconds=e.wait_seconds)).strftime('%H:%M:%S')
