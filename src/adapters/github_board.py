@@ -543,8 +543,90 @@ class GitHubBoardAdapter(BoardPort):
                 return item["id"]
         return None
 
+    # ── Validação de pertinência (isolamento de IDs entre boards) ────────────
+    #
+    # Correção 5 — Incidente Issue Fantasma:
+    #   O espaço de números de issues no GitHub é compartilhado entre todos os
+    #   boards do repositório. Uma operação destrutiva num board "story" poderia
+    #   fechar/alterar issues do board "epic" que coincidissem numericamente.
+    #
+    #   Antes de qualquer operação destrutiva (close_issue, update_issue) esta
+    #   validação é executada: consulta-se via GraphQL os projectItems da issue
+    #   e verifica-se se o project_id do board alvo está entre eles.
+    #
+    #   Impacto em rate limit: +1 chamada GraphQL por operação destrutiva.
+    #   Em cenários de board ativo com 10 closes/minuto, isso representa ~10
+    #   chamadas GraphQL adicionais por minuto — dentro da quota padrão de
+    #   5000 pontos/hora do GitHub GraphQL.
+
+    _BELONGS_QUERY = """
+query($owner:String!,$repo:String!,$number:Int!){
+  repository(owner:$owner,name:$repo){
+    issue(number:$number){
+      projectItems(first:10){
+        nodes{
+          project{ id }
+        }
+      }
+    }
+  }
+}"""
+
+    def _belongs_to_board(self, board_id: str, issue_id: str) -> bool:
+        """Verifica se a issue de number `issue_id` pertence ao projeto associado a `board_id`.
+
+        Consulta os projectItems da issue via GraphQL e compara o project.id
+        retornado com o project_id do board alvo (meta["project_id"]).
+
+        Retorna True se o board alvo está entre os projetos da issue.
+        Retorna False se a issue não pertence a nenhum projeto ou não pertence
+        ao board alvo.
+        """
+        meta = self._board_meta(board_id)
+        project_id = meta["project_id"]
+        owner, repo = self._repo.split("/")
+
+        data = self._gql(
+            self._BELONGS_QUERY,
+            owner=owner,
+            repo=repo,
+            number=int(issue_id),
+        )
+
+        nodes = (
+            (data.get("repository") or {})
+            .get("issue", {})
+            .get("projectItems", {})
+            .get("nodes", [])
+        )
+
+        return any(
+            (node.get("project") or {}).get("id") == project_id
+            for node in nodes
+        )
+
+    def _assert_belongs_to_board(self, board_id: str, issue_id: str) -> bool:
+        """Valida pertinência e loga warning se não pertencer.
+
+        Retorna True se a operação deve prosseguir, False se deve ser abortada.
+        """
+        if not self._belongs_to_board(board_id, issue_id):
+            log.warning(
+                "GitHub",
+                f"[{board_id}] #{issue_id} não pertence a este board — operação abortada",
+                operation="pertinencia_check",
+                board_id=board_id,
+                issue_id=issue_id,
+            )
+            return False
+        return True
+
     def update_issue(self, board_id: str, issue_id: str, title: str = None, body: str = None) -> None:
         self._penalty_check()
+        # Valida pertinência antes de qualquer escrita — impede atualização
+        # de issues de outro board que coincidam numericamente (Correção 5).
+        if not self._assert_belongs_to_board(board_id, issue_id):
+            return
         log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - Atualizando issue",
                  operation="update_issue", board_id=board_id, issue_id=issue_id)
         args = ["issue", "edit", issue_id, "--repo", self._repo]
@@ -574,6 +656,10 @@ class GitHubBoardAdapter(BoardPort):
 
     def close_issue(self, board_id: str, issue_id: str) -> None:
         self._penalty_check()
+        # Valida pertinência antes de fechar — impede fechamento de issues de
+        # outro board que coincidam numericamente (Correção 5 — Incidente Issue Fantasma).
+        if not self._assert_belongs_to_board(board_id, issue_id):
+            return
         log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - Fechando issue",
                  operation="close_issue", board_id=board_id, issue_id=issue_id)
         self._gh("issue", "close", issue_id, "--repo", self._repo)
