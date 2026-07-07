@@ -1,0 +1,21 @@
+# ⚠️ PROTÓTIPO DE UX — NÃO É O ARTEFATO FINAL DE DEPLOY
+#
+# Override para rodar a esteira em MODO EFÊMERO de forma explícita e consciente
+# (persona secundária "CI Bot / Camila QA" — teste isolado, demonstração).
+#
+# Uso:
+#   docker compose -f docker-compose.prototipo.yml -f compose.ephemeral.prototipo.yml up
+#
+# Por que um override em vez de comentar linhas no compose principal?
+# → Prevenção de erro (H-2): manter o compose principal SEMPRE persistente
+#   evita que alguém rode efêmero por engano. Efêmero é uma escolha declarada.
+#
+# Este override zera os binds de estado usando volumes anônimos: o container
+# enxerga os diretórios, mas nada é gravado no host — estado some a cada `down`.
+
+services:
+  esteira:
+    volumes:
+      - /app/.pipe
+      - /app/repo
+      - /app/logs
