@@ -179,6 +179,27 @@ cai para `/tmp`. Isso não impede a execução. O Dockerfile pode definir
 kiro-cli) por fora do container,
 **para** que a esteira autentique e opere sem qualquer interação manual.
 
+### Desambiguação: por que US-02 é diferente de US-01?
+
+**US-01 (#16)** garante que a **imagem existe e está correta**: os binários
+estão instalados, o código foi copiado, o usuário é não-root. Pergunta
+respondida: *"a imagem tem o que precisa?"*
+
+É perfeitamente possível concluir US-01 com um `docker build` bem-sucedido e
+ainda não saber se `kiro-cli` aceita `KIRO_API_KEY` sem prompt interativo, se
+`gh` dispensa `gh auth login` com apenas `GH_TOKEN`, ou se a cópia da chave
+SSH pelo `_setup_ssh` é suficiente para o clone funcionar sem toque humano.
+
+**US-02 (esta story)** garante que esses binários **autenticam sem interação
+humana** quando as credenciais corretas são fornecidas por fora. Pergunta
+respondida: *"uma vez que as credenciais são injetadas, funciona de fato em
+headless?"*
+
+Além disso, US-02 produz as especificações exatas de quais env vars declarar
+e quais volumes montar — base formal sem a qual US-03 (compose) não tem como
+saber o que injetar. As duas stories são ortogonais: a imagem pode estar perfeita
+(US-01) e o compose ainda não saber o que declarar (US-02 pendente).
+
 ### Rastreabilidade
 
 RF-02, RF-03, RF-04, D-01, D-03; ADR-01, ADR-02, ADR-03; RNF-01; riscos R-1, R-3.
