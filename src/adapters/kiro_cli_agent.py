@@ -9,6 +9,7 @@ from pathlib import Path
 from src.core.agent import AgentPort, AgentParams
 from src.core.log import log
 from src.core.session import SessionIndex
+from src.core.context_generator import CONTEXT_FILE
 
 _tz = timezone(timedelta(hours=-3))
 
@@ -66,6 +67,12 @@ class KiroCliAgent(AgentPort):
         ]
         if params.model:
             cmd += ["--model", params.model]
+
+        # Injeta o contexto do sistema via --agent (quando CONTEXT.md existe).
+        # O arquivo .kiro/agents/pipe_context.json foi gerado pelo startup a
+        # partir do pipe.yml e contém as instruções explícitas para o agente.
+        if CONTEXT_FILE.exists():
+            cmd += ["--agent", "pipe_context"]
 
         # Retoma a sessão anterior se ainda existir.
         index = SessionIndex()

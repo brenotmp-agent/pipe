@@ -1,19 +1,28 @@
 """Gerador de CONTEXT.md — instrui agentes sobre regras e estrutura do sistema.
 
-Gerado automaticamente no startup a partir do pipe.yml. O arquivo resultante
-é incluído no prompt de cada execução do agente, prevenindo comportamentos
-implícitos (ex: incidente Issue Fantasma).
+Gerado automaticamente no startup a partir do pipe.yml. O conteúdo resultante
+é injetado como agente kiro-cli via --agent (nunca embutido inline no prompt),
+prevenindo comportamentos implícitos (ex: incidente Issue Fantasma).
 
-Arquivo gerado: .pipe/CONTEXT.md
+Arquivos gerados:
+  .pipe/CONTEXT.md               — instruções em Markdown
+  .kiro/agents/pipe_context.json — arquivo de agente do kiro-cli com o conteúdo
+
 Regra de regeneração: recria se não existir OU se pipe.yml for mais novo.
 """
 
+import json
 from pathlib import Path
 
-CONTEXT_PATH = Path(".pipe") / "CONTEXT.md"
-PIPEYML_PATH = Path("pipe.yml")
+# Caminhos usados como variáveis de módulo para facilitar o mock em testes.
+PIPE_FILE: Path = Path("pipe.yml")
+CONTEXT_FILE: Path = Path(".pipe") / "CONTEXT.md"
+AGENT_FILE: Path = Path(".kiro") / "agents" / "pipe_context.json"
 
-# Arquivos internos da esteira que o agente NUNCA deve tocar
+# Nome do agente kiro-cli registrado no arquivo JSON.
+_AGENT_NAME = "pipe_context"
+
+# Arquivos internos da esteira que o agente NUNCA deve tocar.
 _PROTECTED_FILES = [
     ".pipe/boards/*/snapshot.json",
     ".pipe/changeQueue.json",
@@ -25,11 +34,11 @@ _PROTECTED_FILES = [
 
 def _needs_regeneration() -> bool:
     """Retorna True se o CONTEXT.md precisa ser (re)criado."""
-    if not CONTEXT_PATH.exists():
+    if not CONTEXT_FILE.exists():
         return True
-    if not PIPEYML_PATH.exists():
+    if not PIPE_FILE.exists():
         return False
-    return PIPEYML_PATH.stat().st_mtime > CONTEXT_PATH.stat().st_mtime
+    return PIPE_FILE.stat().st_mtime > CONTEXT_FILE.stat().st_mtime
 
 
 def _section_restrictions() -> list[str]:
@@ -57,11 +66,9 @@ def _section_issue_naming() -> list[str]:
     return [
         "## Criação de issues",
         "",
-        "Ao criar uma nova issue em um board, crie APENAS os seguintes arquivos:",
+        "Ao criar uma nova issue em um board, crie APENAS o seguinte arquivo:",
         "",
         "- `<slug>-body.md`",
-        "- `<slug>-history.md` (opcional, pode ser vazio)",
-        "- `<slug>-addcomment.md` (opcional)",
         "",
         "### Regras de nomeação (sem prefixo numérico)",
         "",
@@ -142,22 +149,13 @@ def _section_branches(config: dict) -> list[str]:
     return lines
 
 
-def generate_context(config: dict) -> None:
-    """Gera .pipe/CONTEXT.md a partir do config se necessário.
-
-    Cria o arquivo se não existir. Regenera se pipe.yml foi modificado
-    após o CONTEXT.md. Não sobrescreve se o CONTEXT.md já estiver atualizado.
-    """
-    if not _needs_regeneration():
-        return
-
-    CONTEXT_PATH.parent.mkdir(parents=True, exist_ok=True)
-
+def _build_content(config: dict) -> str:
+    """Monta o conteúdo completo do CONTEXT.md."""
     sections: list[str] = [
         "# Contexto do sistema — gerado automaticamente",
         "",
         "Este arquivo é gerado pelo startup da esteira a partir do `pipe.yml` "
-        "e incluído no prompt de cada execução do agente.",
+        "e injetado como agente kiro-cli em cada execução.",
         "**Não edite manualmente** — será sobrescrito ao reiniciar.",
         "",
     ]
@@ -165,5 +163,31 @@ def generate_context(config: dict) -> None:
     sections += _section_issue_naming()
     sections += _section_boards(config)
     sections += _section_branches(config)
+    return "\n".join(sections)
 
-    CONTEXT_PATH.write_text("\n".join(sections), encoding="utf-8")
+
+def generate_context(config: dict) -> Path:
+    """Gera .pipe/CONTEXT.md e .kiro/agents/pipe_context.json a partir do config.
+
+    Cria os arquivos se não existirem. Regenera se pipe.yml foi modificado
+    após o CONTEXT.md. Não sobrescreve se o CONTEXT.md já estiver atualizado.
+
+    Retorna o Path do CONTEXT.md gerado.
+    """
+    if not _needs_regeneration():
+        return CONTEXT_FILE
+
+    # Gerar CONTEXT.md
+    CONTEXT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    content = _build_content(config)
+    CONTEXT_FILE.write_text(content, encoding="utf-8")
+
+    # Gerar arquivo de agente JSON para o kiro-cli
+    AGENT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    agent_data = {
+        "name": _AGENT_NAME,
+        "prompt": content,
+    }
+    AGENT_FILE.write_text(json.dumps(agent_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    return CONTEXT_FILE

@@ -146,14 +146,6 @@ def build_prompt(config: dict, task: dict) -> str:
     lines.append(f"**Objetivo:** {col.get('target-prompt', '')}")
     lines.append("")
 
-    # ── Contexto do sistema (.pipe/CONTEXT.md) ──
-    context_path = Path(".pipe") / "CONTEXT.md"
-    if context_path.exists():
-        context_content = context_path.read_text(encoding="utf-8").strip()
-        if context_content:
-            lines.append(context_content)
-            lines.append("")
-
     # ── Sandbox / regras de operação ──
     lines.append("## Diretório de trabalho (OBRIGATÓRIO)")
     lines.append("")
