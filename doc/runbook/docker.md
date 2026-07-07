@@ -3,12 +3,33 @@
 > **Público:** analista/operador sem conhecimento prévio do código.
 > Seguindo este guia do início ao fim você coloca a esteira funcionando
 > em qualquer host com Docker.
+>
+> ⏱ **Tempo estimado:** ~15 minutos (fora o tempo de build da imagem, que
+> acontece uma única vez).
 
 ---
 
-## Pré-requisitos
+## Conteúdo
 
-### No host
+1. [Antes de começar](#antes-de-começar) — pré-requisitos e credenciais a reunir
+2. [Quickstart (TL;DR)](#quickstart-tldr) — para quem já tem as credenciais
+3. [Passo a passo de subida](#passo-a-passo-de-subida)
+4. [Como verificar que está rodando](#como-verificar-que-está-rodando)
+5. [Parar e reiniciar](#parar-a-esteira)
+6. [Rotação da KIRO_API_KEY](#rotação-da-kiro_api_key)
+7. [Referências](#referências)
+
+---
+
+## Antes de começar
+
+### O que você precisa saber
+
+Este guia assume que você sabe abrir um terminal, editar um arquivo de texto e
+rodar comandos. **Não** exige conhecimento do código da esteira nem de
+arquitetura Docker — cada passo traz o comando exato e o resultado esperado.
+
+### Pré-requisitos no host
 
 | Requisito | Verificação |
 |-----------|-------------|
@@ -20,7 +41,17 @@
 
 ### Credenciais necessárias
 
-Você precisa ter em mãos, antes de começar:
+Você precisa ter em mãos, antes de começar. Use este checklist para não travar
+no meio do processo:
+
+- [ ] **Chave SSH privada** cadastrada no GitHub (clone dos repositórios)
+- [ ] **`GH_TOKEN`** — Personal Access Token do GitHub (escopos `repo` e `project`)
+- [ ] **`KIRO_API_KEY`** — API key do Kiro (requer plano Pro ou superior)
+
+> ⚠ **Conta Kiro gerenciada por administrador (R-3):** se sua conta é
+> corporativa/gerenciada, o administrador precisa **habilitar a geração de API
+> keys** antes que você consiga criar a `KIRO_API_KEY`. Verifique isso já, pois
+> é o ponto mais comum de bloqueio.
 
 #### 1. Chave SSH privada (para clone de repositórios via SSH)
 
@@ -53,6 +84,35 @@ A API key autentica o `kiro-cli` em modo headless (sem browser).
   administrador Kiro. Referência:
   [kiro.dev/docs/cli/enterprise/governance/api-keys](https://kiro.dev/docs/cli/enterprise/governance/api-keys/).
 - Guarde o valor — ele não é exibido novamente.
+
+---
+
+## Quickstart (TL;DR)
+
+> Para quem **já tem** as três credenciais em mãos (SSH, `GH_TOKEN`,
+> `KIRO_API_KEY`) e só quer subir. Se é sua primeira vez, pule para o
+> [passo a passo detalhado](#passo-a-passo-de-subida).
+
+```bash
+# 1. Clonar e entrar no repositório
+git clone git@github.com:<seu-usuario>/pipe.git && cd pipe
+
+# 2. Criar o .env e preencher os 3 segredos (SSH_KEY_FILE_HOST, GH_TOKEN, KIRO_API_KEY)
+cp .env.example .env
+${EDITOR:-nano} .env
+
+# 3. Ajustar pipe.yml e o contexto do agente (contexts/kiro-cli/dev.md)
+
+# 4. Construir e subir
+docker compose build
+docker compose up -d
+
+# 5. Acompanhar o arranque
+docker compose logs -f
+```
+
+Loop rodando sem erros nas primeiras linhas = sucesso. Detalhes de cada passo e
+como verificar a saúde estão nas seções abaixo.
 
 ---
 
@@ -219,15 +279,18 @@ são **preservados**. Ao subir novamente com `docker compose up -d`:
 - O histórico de sessões do kiro-cli é mantido (continuidade de raciocínio
   dos agentes).
 
-### Destruir o estado (reset completo)
+### ⛔ Destruir o estado (reset completo)
+
+> **AÇÃO IRREVERSÍVEL.** O comando abaixo apaga **todo o estado** da esteira.
+> Use apenas se quiser realmente começar do zero.
 
 ```bash
 docker compose down -v
 ```
 
-O flag `-v` remove **todos os volumes nomeados**. Use apenas se quiser
-um reset completo. Na próxima subida, a esteira parte do zero (re-clona
-repositórios, recria snapshots, inicia novas sessões de agente).
+O flag `-v` remove **todos os volumes nomeados**. Na próxima subida, a esteira
+parte do zero (re-clona repositórios, recria snapshots, inicia novas sessões de
+agente — perdendo a continuidade de raciocínio dos agentes).
 
 ---
 
