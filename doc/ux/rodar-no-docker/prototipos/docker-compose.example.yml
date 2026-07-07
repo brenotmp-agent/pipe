@@ -1,0 +1,72 @@
+# =============================================================================
+# PROTÓTIPO DE UX — docker-compose (US-03)
+# Autora: Talita Souza — User Experience   |   Status: protótipo para validação
+# -----------------------------------------------------------------------------
+# Este é um PROTÓTIPO de DX, não o arquivo final de produção. Serve para validar
+# a experiência do operador. A implementação canônica na raiz do repositório
+# pertence à story de engenharia, que deve usar este arquivo como referência.
+#
+# VALOR CENTRAL DESTA STORY — "SEM REBUILD":
+#   Toda a configuração (pipe.yml, contexts/) e todos os segredos (.env, chave
+#   SSH) entram POR FORA da imagem. Para trocar a configuração:
+#       1. edite ./pipe.yml, ./contexts/ ou ./.env
+#       2. rode:  docker compose up -d
+#   NÃO é necessário 'docker build'. Só há rebuild se você mudar o código-fonte
+#   (src/) ou o Dockerfile.
+#
+# Requer Docker Compose V2 (comando 'docker compose', sem hífen).
+# =============================================================================
+
+services:
+  pipe:
+    # Imagem construída pela story da imagem (US-01). Trocar a tag NÃO exige
+    # rebuild local — basta apontar para outra imagem já publicada/construída.
+    image: pipe:latest
+
+    # ---- Segredos e credenciais (vêm do .env do host — NUNCA versionados) ----
+    # As 3 variáveis abaixo são lidas do arquivo .env ao lado deste compose.
+    # Copie o protótipo env.example para .env e preencha. O .env fica no
+    # .gitignore: nada sensível é versionado nem embutido na imagem (RNF-01).
+    env_file:
+      - .env
+
+    environment:
+      # Caminho INTERNO (dentro do container) da chave SSH montada como secret.
+      # _setup_ssh() copia esse arquivo para ~/.ssh/id_pipe no arranque.
+      - PIPE_SSH_KEY_FILE=/run/secrets/ssh_key
+
+    # ---- Configuração (montada por volume, read-only) -----------------------
+    # Editar estes arquivos no host e rodar 'docker compose up -d' aplica a nova
+    # configuração SEM rebuild. É exatamente o objetivo da US-03.
+    volumes:
+      - ./pipe.yml:/app/pipe.yml:ro      # config principal da esteira
+      - ./contexts:/app/contexts:ro      # contextos dos agentes
+
+      # ---- Estado persistente (volumes nomeados) --------------------------
+      # Declarados aqui (escopo desta US). A semântica de persistência ao
+      # down/up é validada na story de persistência. 'kiro-home' preserva a
+      # continuidade de sessão do agente entre reinícios.
+      - pipe-repo:/app/repo              # clones dos repositórios git
+      - pipe-logs:/app/logs              # logs de execução
+      - pipe-state:/app/.pipe            # fila, snapshots, sessions.json
+      - kiro-home:/home/pipe/.kiro       # sessões SQLite do kiro-cli
+
+    # Chave SSH injetada como Docker secret (montada 0400, somente leitura).
+    # Preferível a bind-mount: não expõe o conteúdo como variável de ambiente.
+    secrets:
+      - ssh_key
+
+    # NOTA: 'restart', 'healthcheck' e política de operação autônoma são
+    # definidos nas stories de operação (US-04/US-05), que convivem neste mesmo
+    # arquivo. Ficam fora do escopo do protótipo de US-03.
+
+# O arquivo da chave SSH fica no host; seu caminho vem do .env (não versionado).
+secrets:
+  ssh_key:
+    file: ${SSH_KEY_FILE_HOST}
+
+volumes:
+  pipe-repo:
+  pipe-logs:
+  pipe-state:
+  kiro-home:
