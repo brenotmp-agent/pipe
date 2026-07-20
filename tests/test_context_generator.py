@@ -568,6 +568,24 @@ class TestArquivoDeAgente(unittest.TestCase):
         self.assertIn("name", data)
         self.assertTrue(data["name"])
 
+    def test_arquivo_de_agente_tem_tools(self):
+        """O arquivo JSON deve ter campo 'tools' para garantir acesso a write/shell/git.
+
+        Por padrão, custom agents do kiro-cli só têm ferramentas read-only.
+        O campo 'tools' com '*' (ou lista explícita) é necessário para que o
+        agente pipe_context tenha acesso às mesmas capacidades que o agente
+        padrão (escrita, shell, git etc.).
+        """
+        _, agent_file = self._run()
+        data = json.loads(agent_file.read_text())
+        self.assertIn("tools", data,
+                      "Campo 'tools' ausente — custom agents são read-only por padrão; "
+                      "sem esse campo o agente não poderá escrever arquivos nem executar comandos.")
+        tools = data["tools"]
+        self.assertIsInstance(tools, list)
+        self.assertGreater(len(tools), 0,
+                           "Lista 'tools' vazia — o agente ficaria sem nenhuma ferramenta.")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Grupo 8 — Localização do arquivo de agente (validado contra doc kiro-cli)
@@ -637,20 +655,19 @@ class TestLocalizacaoArquivoDeAgente(unittest.TestCase):
         )
 
     def test_kiro_cli_precisa_de_kiro_home_ou_agente_no_repo_para_encontrar_agente(self):
-        """Documenta que o kiro-cli SÓ encontra o agente se KIRO_HOME ou arquivo no repo forem usados.
+        """Verifica que o adapter configura KIRO_HOME corretamente no env do subprocess.
 
         A documentação do kiro-cli informa:
         - Local: <cwd>/.kiro/agents/<nome>.json   (precedência)
         - Global: ~/.kiro/agents/<nome>.json        (fallback)
         - KIRO_HOME sobrescreve ~/.kiro como diretório de agentes globais
 
-        Para a esteira funcionar corretamente, uma das seguintes condições deve ser verdadeira:
-        (a) O arquivo é gerado em ~/.kiro/agents/ (global) — risco de colisão entre projetos
-        (b) KIRO_HOME é configurado para a esteira e passado ao subprocess do kiro-cli
-        (c) O arquivo é gerado no <repo>/.kiro/agents/ (local ao repo) — mais isolado
+        O adapter deve:
+        (a) Configurar KIRO_HOME no env do subprocess, E
+        (b) KIRO_HOME deve ser um path absoluto, E
+        (c) O arquivo pipe_context.json deve existir em <KIRO_HOME>/agents/
 
-        Este teste verifica que o adapter configura KIRO_HOME corretamente no env do subprocess
-        para que o kiro-cli encontre o arquivo de agente.
+        Sem isso, o kiro-cli executado com cwd=repo/main não encontrará o agente.
         """
         from src.adapters.kiro_cli_agent import KiroCliAgent
         from src.core.agent import AgentParams
@@ -659,10 +676,10 @@ class TestLocalizacaoArquivoDeAgente(unittest.TestCase):
         ctx_file = self.esteira_dir / ".pipe" / "CONTEXT.md"
         ctx_file.write_text("# Contexto\nRESTRIÇÕES\n")
 
-        # Arquivo de agente gerado no diretório da esteira
+        # Arquivo de agente gerado no diretório .kiro da esteira
         agent_file = self.esteira_dir / ".kiro" / "agents" / "pipe_context.json"
         agent_file.parent.mkdir(parents=True, exist_ok=True)
-        agent_file.write_text('{"name": "pipe_context", "prompt": "context"}')
+        agent_file.write_text('{"name": "pipe_context", "prompt": "context", "tools": ["*"]}')
 
         params = AgentParams(
             platform="kiro-cli",
@@ -690,31 +707,48 @@ class TestLocalizacaoArquivoDeAgente(unittest.TestCase):
 
         agent = KiroCliAgent()
 
+        # Patcha AGENT_FILE com o path absoluto do arquivo de agente da esteira.
+        # Isso simula a produção: AGENT_FILE.resolve() deve retornar o path
+        # absoluto correto, e .parent.parent deve ser <esteira>/.kiro.
         with patch("subprocess.run", side_effect=fake_run), \
              patch("src.adapters.kiro_cli_agent.SessionIndex") as mock_idx, \
-             patch("src.adapters.kiro_cli_agent.CONTEXT_FILE", ctx_file, create=True), \
-             patch("src.adapters.kiro_cli_agent.AGENT_FILE", agent_file, create=True):
+             patch("src.adapters.kiro_cli_agent.CONTEXT_FILE", ctx_file), \
+             patch("src.adapters.kiro_cli_agent.AGENT_FILE", agent_file):
             mock_idx.return_value.get.return_value = None
             mock_idx.return_value.set.return_value = None
             agent._run(params, self.repo_dir)
 
-        # Quando --agent é passado, o subprocess precisa de KIRO_HOME apontando
-        # para o diretório que contém .kiro/agents/pipe_context.json (a esteira),
-        # OU o arquivo precisa estar em <repo>/.kiro/agents/.
-        if "--agent" in captured_cmds:
-            env_passed = captured_envs[0] if captured_envs else {}
-            kiro_home = env_passed.get("KIRO_HOME", "")
-            agent_in_repo = (self.repo_dir / ".kiro" / "agents" / "pipe_context.json").exists()
-            agente_em_local_acessivel = bool(kiro_home) or agent_in_repo
-            self.assertTrue(
-                agente_em_local_acessivel,
-                "BUG: O adapter passa --agent mas não garante que o arquivo de agente seja "
-                "encontrado pelo kiro-cli. KIRO_HOME não está configurado no env do subprocess "
-                "e o arquivo não está em <repo>/.kiro/agents/. "
-                "O kiro-cli busca agentes locais em <cwd>/.kiro/agents/ e globais em ~/.kiro/agents/. "
-                "Solução A: passar KIRO_HOME=<dir_esteira> no env do subprocess. "
-                "Solução B: gerar o arquivo em <repo>/.kiro/agents/ (mais isolado)."
-            )
+        # O adapter deve ter passado --agent (pré-requisito do teste)
+        self.assertIn("--agent", captured_cmds,
+                      "O adapter não passou --agent ao kiro-cli.")
+
+        # Verifica que KIRO_HOME foi definido no env do subprocess
+        env_passed = captured_envs[0] if captured_envs else {}
+        kiro_home = env_passed.get("KIRO_HOME", "")
+
+        self.assertTrue(
+            kiro_home,
+            "BUG: O adapter passa --agent mas KIRO_HOME não está definido no env do subprocess. "
+            "O kiro-cli buscará agentes em ~/.kiro/agents/ (diretório do usuário), não na esteira."
+        )
+
+        # KIRO_HOME precisa ser um path absoluto para ser válido independente do cwd
+        self.assertTrue(
+            Path(kiro_home).is_absolute(),
+            f"BUG: KIRO_HOME='{kiro_home}' não é um path absoluto. "
+            "Um path relativo é resolvido contra o cwd do subprocess (repo/main), "
+            "não contra o cwd da esteira — apontando para o lugar errado."
+        )
+
+        # O arquivo de agente deve existir em <KIRO_HOME>/agents/pipe_context.json
+        expected_agent_path = Path(kiro_home) / "agents" / "pipe_context.json"
+        self.assertTrue(
+            expected_agent_path.exists(),
+            f"BUG: O arquivo de agente não existe em KIRO_HOME/agents/. "
+            f"KIRO_HOME='{kiro_home}', caminho esperado: '{expected_agent_path}'. "
+            "O kiro-cli não encontrará o agente em produção. "
+            "Corrija: KIRO_HOME deve ser AGENT_FILE.resolve().parent.parent (o diretório .kiro)."
+        )
 
     def test_nome_do_arquivo_de_agente_corresponde_ao_argumento_agent(self):
         """O nome do arquivo JSON deve corresponder ao valor passado em --agent.

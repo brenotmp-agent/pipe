@@ -182,11 +182,16 @@ def generate_context(config: dict) -> Path:
     content = _build_content(config)
     CONTEXT_FILE.write_text(content, encoding="utf-8")
 
-    # Gerar arquivo de agente JSON para o kiro-cli
+    # Gerar arquivo de agente JSON para o kiro-cli.
+    # "tools" e "allowedTools" com "*" garantem que o agente pipe_context
+    # mantenha acesso a todas as ferramentas (write, shell, git etc.), já que
+    # por padrão custom agents só têm acesso read-only.
     AGENT_FILE.parent.mkdir(parents=True, exist_ok=True)
     agent_data = {
         "name": _AGENT_NAME,
         "prompt": content,
+        "tools": ["*"],
+        "allowedTools": ["@builtin"],
     }
     AGENT_FILE.write_text(json.dumps(agent_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
