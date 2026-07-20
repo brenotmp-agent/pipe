@@ -1,0 +1,10 @@
+{
+  "name": "pipe_context",
+  "prompt": "# Contexto do sistema — gerado automaticamente\n\nEste arquivo é gerado pelo startup da esteira a partir do `pipe.yml` e injetado como agente kiro-cli em cada execução.\n**Não edite manualmente** — será sobrescrito ao reiniciar.\n\n## Restrições de sistema (NÃO VIOLAR)\n\nOs arquivos abaixo são memória interna da esteira. NUNCA leia, escreva, crie ou modifique esses arquivos protegidos:\n\n- `.pipe/boards/*/snapshot.json`\n- `.pipe/changeQueue.json`\n- `.pipe/throttle.json`\n- `.pipe/throttle`\n- `.pipe/sessions.json`\n\nQualquer escrita nesses arquivos corrompe o estado da esteira e causa comportamentos imprevisíveis em toda a pipeline.\n\n## Criação de issues\n\nAo criar uma nova issue em um board, crie APENAS o seguinte arquivo:\n\n- `<slug>-body.md`\n\n### Regras de nomeação (sem prefixo numérico)\n\nNÃO prefixe o nome com números.\nO padrão errado seria algo como `4-login-body.md` — isso está errado.\nO ID real é atribuído pelo GitHub após o sync; antes disso o arquivo não tem e não deve ter prefixo numérico.\n\n**Correto:** `implementar-login-body.md`\n**Errado:** `4-implementar-login-body.md`\n\nNÃO escreva IDs numéricos no nome do arquivo.\n\n## Boards e colunas\n\nEstrutura de boards e colunas configurada no pipe.yml:\n\n### Board: Task Board (id: `task`)\n\n- **Flow:** `feature`\n\n| Coluna (id) | Nome | Agente |\n|-------------|------|--------|\n| `todo` | To Do | — |\n| `doing` | Doing | dev |\n| `done` | Done | — |\n\n## Git flow e branches\n\nFlows disponíveis e seus prefixos de branch:\n\n| Flow | Prefixo | Origem | Merge em |\n|------|---------|--------|----------|\n| `feature` | `feature/` | `main` | `main` |\n| `hotfix` | `hotfix/` | `main` | `main` |\n\nBranch base: `main`\n\nAo criar uma branch, use o prefixo correspondente ao flow do board.\nExemplo: flow `feature` → branch `feature/<id>-<slug>`.\n",
+  "tools": [
+    "*"
+  ],
+  "allowedTools": [
+    "@builtin"
+  ]
+}
