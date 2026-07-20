@@ -155,11 +155,21 @@ Se houve qualquer atividade (sync movimentou algo OU existe tarefa para executar
 
 ### Substituição de agente por nível (`override-agent`)
 
-Cada coluna define um agente default no atributo `agent`. Se a issue tiver uma
-tag `/agent_level <nível>` no bloco `@---` e esse `<nível>` for uma chave do
-mapa `override-agent` da coluna, a esteira usa o agente indicado no valor. Se
-não houver `/agent_level`, ou o nível não estiver mapeado, usa o `agent`
-default.
+Cada coluna define um agente default no atributo `agent`. O nível de execução
+de uma issue é armazenado como label `agent-level-<nível>` no GitHub (ex.:
+`agent-level-low`, `agent-level-medium`, `agent-level-high`). Essa label é
+sincronizada nativamente pelo board, garantindo que o nível persista entre
+ciclos de sync.
+
+Se a issue possuir uma label `agent-level-<nível>` e esse `<nível>` for uma
+chave do mapa `override-agent` da coluna, a esteira usa o agente indicado no
+valor. Caso contrário, usa o `agent` default.
+
+No fluxo do planning-poker, o agente escreve `/agent_level <nível>` no bloco
+`@---` do body. O sync-up lê esse campo via `all_labels()` e grava a label
+`agent-level-<nível>` no GitHub automaticamente. A resolução de agente em
+`resolve_agent_id()` lê diretamente `issue["labels"]` — sem dependência de
+arquivo local.
 
 Como cada agente carrega o próprio `model`, trocar o agente por nível troca
 também o model efetivo da execução.
@@ -169,8 +179,8 @@ columns:
   desenvolvimento:
     agent: engineering          # default
     override-agent:
-      low: generic              # /agent_level low  -> generic
-      high: senior-engineering  # /agent_level high -> senior-engineering
+      low: generic              # agent-level-low  -> generic
+      high: senior-engineering  # agent-level-high -> senior-engineering
 ```
 
 Validação (`config.py`): `override-agent` deve ser um mapa `<nível>: <agente>`,

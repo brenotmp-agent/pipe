@@ -5,7 +5,8 @@ from pathlib import Path
 
 from src.core.board import Board, ChangeItem, Issue, PenaltyException, SyncEvent
 from src.core.change_queue import ChangeQueue
-from src.core.commands import apply_events_to_commands, compose_body, from_issue, split_body
+from src.core.commands import (AGENT_LEVEL_PREFIX, apply_events_to_commands,
+                               compose_body, from_issue, split_body)
 from src.core.log import log
 from src.core.snapshot import BOARDS_DIR, Snapshot
 
@@ -736,6 +737,64 @@ def _apply_delete_down(board_id: str, item: ChangeItem, board_obj: Board):
 
     log.info("Sync", f"[{board_id}] delete-down #{item.id} - arquivos removidos",
              issue_id=item.id)
+
+
+def migrate_agent_level_labels(board_id: str, queue: ChangeQueue) -> int:
+    """Migra issues abertas com /agent_level no @--- para label agent-level-<nível>.
+
+    Para cada issue rastreada no snapshot que:
+    - não possui nenhuma label agent-level-* no estado conhecido, E
+    - possui /agent_level no bloco @--- do arquivo body local
+
+    … enfileira um change-up para que o ciclo de sync-up grave a label correta
+    no board via all_labels(). A reescrita do body não é necessária: o
+    serialize_commands já emite /agent_level, e o all_labels() já emite a label
+    correspondente — basta que o item suba.
+
+    Retorna o número de issues migradas (enfileiradas).
+    """
+    snap = Snapshot(board_id).load()
+    migrated = 0
+
+    for issue_data in snap.issues:
+        issue_id = str(issue_data.get("id") or "")
+        if not issue_id:
+            continue
+        if issue_data.get("status", "ok") != "ok":
+            continue
+
+        # Verifica se o estado conhecido já tem label agent-level-*
+        known_labels = issue_data.get("labels") or []
+        has_level_label = any(
+            str(lbl).startswith(AGENT_LEVEL_PREFIX) for lbl in known_labels
+        )
+        if has_level_label:
+            continue  # já migrada ou nível já presente no board
+
+        # Verifica se o body local possui /agent_level no bloco @---
+        body_path = Path(issue_data.get("body_path", ""))
+        if not body_path.exists():
+            continue
+
+        content = body_path.read_text(encoding="utf-8")
+        # Remove a primeira linha (título)
+        raw_body = content.split("\n", 1)[1] if "\n" in content else ""
+        _, cmds = split_body(raw_body)
+
+        if not cmds.agent_level:
+            continue  # sem /agent_level no body — nada a migrar
+
+        # Enfileira change-up para que o sync-up grave a label no board
+        if queue.add(ChangeItem.of(SyncEvent.CHANGE_UP, id=issue_id, board=board_id)):
+            issue_data["status"] = SyncEvent.CHANGE_UP.value
+            log.info("Migrate", f"[{board_id}] #{issue_id} agent_level='{cmds.agent_level}' "
+                     f"→ enfileirado change-up para gravar label agent-level-{cmds.agent_level}")
+            migrated += 1
+
+    if migrated:
+        snap.save()
+
+    return migrated
 
 
 def _format_history(comments: list[dict]) -> str:

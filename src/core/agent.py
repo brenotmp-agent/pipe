@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.core.commands import annotations_doc, split_body, AGENT_LEVEL_PREFIX
+from src.core.commands import annotations_doc, AGENT_LEVEL_PREFIX
 from src.core.snapshot import BOARDS_DIR
 
 REPO_DIR = Path("repo")
