@@ -48,6 +48,9 @@ SEP = "@---"
 # separadamente (não aparece na lista de /labels).
 NEED_HUMAN_LABEL = "need_human"
 
+# Prefixo das labels de nível de agente (ex.: agent-level-high).
+AGENT_LEVEL_PREFIX = "agent-level-"
+
 
 @dataclass
 class IssueCommands:
@@ -72,10 +75,14 @@ class IssueCommands:
         )
 
     def all_labels(self) -> list[str]:
-        """Labels efetivas no board, incluindo a especial need_human."""
+        """Labels efetivas no board, incluindo as especiais need_human e agent-level-*."""
         result = list(self.labels)
         if self.need_human and NEED_HUMAN_LABEL not in result:
             result.append(NEED_HUMAN_LABEL)
+        if self.agent_level:
+            agent_level_label = f"{AGENT_LEVEL_PREFIX}{self.agent_level}"
+            if agent_level_label not in result:
+                result.append(agent_level_label)
         return result
 
 
@@ -86,20 +93,33 @@ class IssueCommands:
 def from_issue(issue) -> IssueCommands:
     """Constrói IssueCommands a partir de uma Issue do board (fluxo down).
 
-    A label especial need_human é extraída para o campo próprio e não aparece
-    na lista de labels.
+    Labels especiais são extraídas para campos próprios e não aparecem na
+    lista de labels:
+    - need_human → campo need_human
+    - agent-level-<nível> → campo agent_level
     """
     labels = list(issue.labels or [])
     need_human = NEED_HUMAN_LABEL in labels
     labels = [l for l in labels if l != NEED_HUMAN_LABEL]
+
+    # Extrai agent_level a partir de labels com prefixo agent-level-
+    agent_level_value = None
+    filtered_labels = []
+    for lbl in labels:
+        if lbl.startswith(AGENT_LEVEL_PREFIX):
+            if agent_level_value is None:  # usa a primeira encontrada
+                agent_level_value = lbl[len(AGENT_LEVEL_PREFIX):]
+        else:
+            filtered_labels.append(lbl)
 
     return IssueCommands(
         parent=getattr(issue, "parent", None),
         children=list(getattr(issue, "children", None) or []),
         blocked_by=list(getattr(issue, "blocked_by", None) or []),
         blocks=list(getattr(issue, "blocks", None) or []),
-        labels=labels,
+        labels=filtered_labels,
         need_human=need_human,
+        agent_level=agent_level_value,
     )
 
 

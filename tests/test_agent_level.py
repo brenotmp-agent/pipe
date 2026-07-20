@@ -48,13 +48,14 @@ def _issue_with_body(tmp_path, body_block: str) -> dict:
 
 
 def test_agent_level_le_do_body(tmp_path):
-    issue = _issue_with_body(tmp_path, "/agent_level high")
+    """Após refatoração: agent_level lê de issue['labels'], não do arquivo body."""
+    issue = {"labels": ["agent-level-high"], "body_path": ""}
     assert agent_level(issue) == "high"
 
 
 def test_resolve_usa_override_quando_nivel_mapeado(tmp_path):
     col = {"agent": "engineering", "override-agent": {"high": "senior", "low": "generic"}}
-    issue = _issue_with_body(tmp_path, "/agent_level high")
+    issue = {"labels": ["agent-level-high"], "body_path": ""}
     assert resolve_agent_id(col, issue) == "senior"
 
 
