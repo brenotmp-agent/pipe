@@ -63,42 +63,51 @@ As abordagens não são mutuamente exclusivas: a 1 estabiliza imediatamente, a 2
 
 ---
 
-## Decisão de tratamento
+## Decisão de tratamento (revisada)
 
-**Opção escolhida: Opção 2 — Tasks de correção no board Task.**
+**Opção escolhida: Opção 2 — Task de correção no board Task.**
 
-**Justificativa:**
+**Responsável pela revisão:** Isabela Gomes - Tech Lead
+**Data da revisão:** 2026-07-20
 
-O incidente é um bug de software com causa raiz clara, solução técnica bem definida e escopo de correção delimitado (~0,5 a 2 dias). Não há sistema fora do ar, não há perda de dados irreversível e não há necessidade de ação de emergência fora do fluxo normal de desenvolvimento. O problema é grave (P1) em termos de impacto funcional, mas tratável pelo processo padrão de engenharia sem necessidade de manter o fluxo de incidente produtivo ativo.
+**Histórico de revisão:**
+- Decisão original (2026-07-07): duas tasks — hotfix (Abordagem 1) + refatoração estrutural (Abordagem 2).
+- Revisão solicitada por `brenodpm` (2026-07-20): a Abordagem 1 (hotfix — preservar no sync) foi rejeitada por criar complexidade desnecessária em `_apply_change_down` e estabelecer precedente para bugs futuros. Aprovada somente a Abordagem 2 (refatoração estrutural via labels).
 
-Serão criadas **duas tasks** no board `task`:
-1. **Hotfix (Abordagem 1):** Preservar `/agent_level` no sync down — correção imediata de baixo risco.
-2. **Refatoração estrutural (Abordagem 2):** Persistir `agent_level` via label `agent-level-<nível>` no GitHub — elimina a fragilidade na raiz, bloqueada pela conclusão do hotfix.
+**Decisão revisada:**
+
+O incidente é um bug de software com causa raiz clara e solução técnica bem definida. O fluxo de incidente produtivo não é necessário. Será criada **uma única task** no board `task`, implementando diretamente a solução estrutural definitiva: persistir o `agent_level` como label no GitHub, eliminando por completo a dependência de estado local volátil que originou o problema.
+
+A decisão de não criar o hotfix intermediário é deliberada: a Abordagem 1 corrigiria o sintoma (`_compose_down_body` descartando o campo) mas deixaria o design original intacto — um campo de estado que existe apenas no arquivo local e é destruído a cada sync down. A Abordagem 2 resolve o problema em sua raiz, tornando o hotfix desnecessário.
 
 ---
 
 ## Tarefas de correção
 
-- [ ] Task: Hotfix — preservar `agent_level` no sync down (`_apply_change_down` em `sync.py`) — board `task`
-- [ ] Task: Refatoração estrutural — persistir `agent_level` via label `agent-level-<nível>` no GitHub — board `task` (bloqueada pela task de hotfix)
+- [ ] Task: Refatoração estrutural — persistir `agent_level` via label `agent-level-<nível>` no GitHub — board `task`
 
 ---
 
 ## Ação proposta
 
-**Decisão:** Opção 2 — problema intermediário resolvível por tasks de correção.
+**Decisão:** Opção 2 — problema intermediário resolvível por task de correção (solução estrutural única).
 
-A análise técnica confirma que o bug tem causa raiz única e bem delimitada, solução técnica documentada e impacto controlável (sem risco de corrupção de dados ou indisponibilidade sistêmica). O fluxo de incidente produtivo não é necessário.
-
-**Task 1 — Hotfix: Preservar `agent_level` no sync down**
+**Task — Refatoração estrutural: Persistir `agent_level` via label `agent-level-<nível>` no GitHub**
 - Board: `task`
-- Objetivo: Corrigir imediatamente a perda do `agent_level` durante o sync down.
-- Escopo: Alterar `_apply_change_down` em `src/core/sync.py` para ler o `agent_level` atual do `-body.md` local antes de sobrescrever e repassá-lo a `_compose_down_body`, que o reinjetará no `IssueCommands` derivado de `from_issue`. Adicionar 1-2 testes de round-trip cobrindo o caminho board → `from_issue` → `_compose_down_body` → arquivo.
-- Esforço: low (~0,5 dia). Risco baixo.
-
-**Task 2 — Refatoração estrutural: Persistir `agent_level` via label no GitHub**
-- Board: `task`
-- Objetivo: Eliminar a dependência de estado local volátil substituindo o armazenamento do `agent_level` por labels no board no formato `agent-level-<nível>`.
-- Escopo: Ajustar planning-poker para gravar a label; adaptar `resolve_agent_id` (`agent.py`) para resolver o nível a partir das labels (match por prefixo); tratar a label como campo especial em `IssueCommands`/serialização (como já feito com `need_human`); migrar issues em aberto; atualizar `override-agent`/config e documentação.
-- Esforço: medium (~1,5-2 dias). Risco médio.
-- Bloqueada pela conclusão da Task 1.
+- Coluna: `backlog`
+- Objetivo: Eliminar a dependência de estado local volátil. O `agent_level` passa a ser armazenado como label no board (`agent-level-low`, `agent-level-medium`, `agent-level-high`), persistido e sincronizado pelo mecanismo de labels já existente.
+- Escopo técnico:
+  - `src/core/agent.py`: adaptar `agent_level()` para resolver o nível a partir das labels da issue (match por prefixo `agent-level-`); adaptar `resolve_agent_id()` conforme necessário.
+  - `src/core/commands.py`: tratar a label `agent-level-<nível>` como campo especial (semelhante a `need_human`) — não deve ser sobrescrita pela semântica SET de `/labels`; atualizar `from_issue()` para popular o campo a partir da label do board.
+  - Planning-poker: garantir que o agente grave a label `agent-level-<nível>` correspondente ao nível definido (em vez de — ou além de — usar `/agent_level` no bloco `@---`).
+  - Migração: converter issues em aberto que possuam `/agent_level` no bloco `@---` para a nova label.
+  - Configuração e docs: verificar se `config.py` / `override-agent` precisam de ajuste; atualizar README com a nova semântica.
+  - Testes: ampliar suíte para cobrir resolução de agente a partir de labels e o tratamento especial da label no ciclo de sync.
+- Esforço: medium (~1,5–2 dias). Risco médio.
+- Critério de aceite:
+  - `agent_level` armazenado como label `agent-level-<nível>` no GitHub.
+  - Sync down preserva o nível via label, sem dependência de estado local.
+  - `resolve_agent_id` retorna o agente correto com base na label.
+  - Label `agent-level-<nível>` não sobrescrita pelo `/labels` do usuário.
+  - Issues em aberto migradas para o novo formato.
+  - Testes passando; sem quebra de funcionalidades existentes.
