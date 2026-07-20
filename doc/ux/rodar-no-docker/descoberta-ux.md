@@ -189,9 +189,11 @@ Nenhuma bloqueia a entrega da prototipação, mas afetam refinamentos:
    produção, abre espaço para um "modo produção" (secrets manager) — hoje fora
    de escopo da US-06.
 3. **Nomes exatos das linhas de log:** o runbook cita `[Config] pipe.yml
-   válido`, `[Board] Sincronizando…`, `[Main] Dormindo N segundos`. Esses
-   rótulos precisam bater com a implementação real de US-01…US-05 quando
-   mergeada. Registrado como risco de manutenção no protótipo.
+   válido`, `[Board] Sincronizando…`, `[Sleep] Nenhuma atividade - dormindo Ns`.
+   **Resolvido na etapa de arquitetura (2026-07-20):** os rótulos vêm do runtime
+   já existente (`__main__.py`) e foram conferidos contra o código — os rótulos
+   reais são `Pipe`, `Config`, `Startup`, `Board`, `KeepTask`, `Sleep` (não há
+   `[Main]`). Docs corrigidos.
 
 ---
 

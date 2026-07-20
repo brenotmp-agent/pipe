@@ -105,7 +105,7 @@ Anotações UX marcadas com ⟦…⟧.
 │  ┌─ log de arranque saudável (referência) ──────────────┐      │
 │  │ [Config] pipe.yml válido                              │      │
 │  │ [Board] Sincronizando…                                │      │
-│  │ [Main] Dormindo 60 segundos   ← loop ocioso = ok      │      │
+│  │ [Sleep] Nenhuma atividade - dormindo 60s ← loop ocioso│      │
 │  └───────────────────────────────────────────────────────┘    │
 │  ⚠ Sinais de problema  (sintoma → causa → solução)             │
 ├───────────────────────────────────────────────────────────────┤
@@ -177,8 +177,10 @@ Padrões reutilizáveis que a versão final do runbook deve seguir:
 - A versão final do runbook (`doc/runbook/docker.md`) já foi ajustada nesta
   etapa para materializar esta AI: índice, estimativa de tempo, "antes de
   começar" com checklist, quickstart TL;DR e aviso destrutivo destacado.
-- **Risco de manutenção:** rótulos de log (`[Config]`, `[Board]`, `[Main]`)
-  devem ser conferidos contra a implementação de US-01…US-05 quando mergeadas.
+- **Risco de manutenção (resolvido em 2026-07-20):** os rótulos de log
+  (`[Config]`, `[Board]`, `[Sleep]`) foram conferidos contra o runtime existente
+  (`__main__.py`) na etapa de arquitetura. Rótulos reais: `Pipe`, `Config`,
+  `Startup`, `Board`, `KeepTask`, `Sleep` — não existe `[Main]`. Docs corrigidos.
 - **Fora de escopo agora:** dividir em múltiplas páginas, "modo produção" com
   secrets manager, e vídeo walkthrough (candidatos a evolução futura, ver
   benchmark na descoberta).

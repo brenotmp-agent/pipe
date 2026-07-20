@@ -588,7 +588,7 @@ Cada passo inclui o comando exato e o resultado esperado.
   - Linha de startup: `[Config] pipe.yml válido`
   - Linha de startup: `[Startup] Verificando repositórios`
   - Ciclo de sync: `[Board] Sincronizando boards remotos`
-  - Ciclo ocioso: `[Main] Dormindo N segundos`
+  - Ciclo ocioso: `[Sleep] Nenhuma atividade - dormindo Ns`
 - O guia indica que a ausência de erros nas primeiras linhas confirma que as
   credenciais foram aceitas.
 

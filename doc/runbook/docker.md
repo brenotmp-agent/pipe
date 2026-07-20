@@ -245,12 +245,12 @@ saída esperada de um arranque bem-sucedido:
 [Board] Sincronizando estrutura local
 [Board] Sincronizando boards remotos
 [Board] 0 mudança(s) remota(s) adicionada(s) à fila
-[Main] Dormindo 60 segundos
+[Sleep] Nenhuma atividade - dormindo 60s (retorna às 14:32)
 ```
 
-O ciclo `[Board] Sincronizando…` → `[Main] Dormindo N segundos` repete
-indefinidamente enquanto a esteira estiver ociosa. Quando há tarefas,
-você verá linhas de `[Agent]` e `[KeepTask]` no lugar do sleep.
+O ciclo `[Board] Sincronizando…` → `[Sleep] Nenhuma atividade - dormindo Ns`
+repete indefinidamente enquanto a esteira estiver ociosa. Quando há tarefas,
+você verá linhas de `[KeepTask]` e `[Agent]` no lugar do sleep.
 
 ### Sinais de problema no arranque
 
