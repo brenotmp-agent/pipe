@@ -569,5 +569,204 @@ class TestArquivoDeAgente(unittest.TestCase):
         self.assertTrue(data["name"])
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Grupo 8 — Localização do arquivo de agente (validado contra doc kiro-cli)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestLocalizacaoArquivoDeAgente(unittest.TestCase):
+    """Valida que o arquivo de agente é gerado num local acessível ao kiro-cli.
+
+    Segundo a documentação oficial do kiro-cli (kiro.dev/docs/cli/custom-agents/
+    configuration-reference/), o kiro-cli busca agentes em:
+      1. <cwd>/.kiro/agents/  (local, workspace-specific)
+      2. ~/.kiro/agents/      (global, user-wide)
+      3. KIRO_HOME sobrescreve ~/. kiro como diretório base de agentes globais
+
+    O kiro-cli é executado com cwd=work_dir (= repo/<repo_id>), enquanto o
+    arquivo de agente é gerado no .kiro/ da esteira (raiz do pipe).
+    Esses dois diretórios são DIFERENTES — o agente não será encontrado via
+    busca local, e só funcionará se o diretório global (~/.kiro/agents/) for
+    usado, via KIRO_HOME configurado para o diretório da esteira, ou se o
+    arquivo for gerado dentro do repositório clonado.
+
+    Estes testes documentam o contrato esperado: o arquivo de agente deve
+    estar acessível ao kiro-cli independentemente do cwd de execução.
+    """
+
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.esteira_dir = Path(self.tmp.name) / "esteira"
+        self.repo_dir = Path(self.tmp.name) / "esteira" / "repo" / "main"
+        self.esteira_dir.mkdir(parents=True)
+        self.repo_dir.mkdir(parents=True)
+        (self.esteira_dir / ".pipe").mkdir()
+        (self.esteira_dir / "pipe.yml").write_text("# pipe.yml\n")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_arquivo_de_agente_nao_esta_no_cwd_do_repo(self):
+        """O arquivo de agente gerado pela esteira NÃO fica no cwd do repo.
+
+        Isso documenta o problema: o kiro-cli executado com cwd=repo/main
+        busca .kiro/agents/ dentro de repo/main — que NÃO é onde o arquivo
+        foi gerado (está em <esteira>/.kiro/agents/).
+
+        Esse teste PASSA documentando a lacuna de localização que precisa ser
+        resolvida via KIRO_HOME ou gerando o arquivo no repo.
+        """
+        ctx_file = self.esteira_dir / ".pipe" / "CONTEXT.md"
+        agent_file_esteira = self.esteira_dir / ".kiro" / "agents" / "pipe_context.json"
+        agent_file_repo = self.repo_dir / ".kiro" / "agents" / "pipe_context.json"
+
+        from src.core.context_generator import generate_context
+        with patch("src.core.context_generator.PIPE_FILE", self.esteira_dir / "pipe.yml"), \
+             patch("src.core.context_generator.CONTEXT_FILE", ctx_file), \
+             patch("src.core.context_generator.AGENT_FILE", agent_file_esteira, create=True):
+            generate_context(_make_config())
+
+        # O arquivo existe no diretório da esteira
+        self.assertTrue(
+            agent_file_esteira.exists(),
+            "Arquivo de agente não foi gerado no diretório da esteira"
+        )
+        # Mas NÃO existe no cwd do repo (onde kiro-cli vai buscar como agente local)
+        self.assertFalse(
+            agent_file_repo.exists(),
+            "Arquivo de agente está no cwd do repo — isso seria válido, mas não é o comportamento atual"
+        )
+
+    def test_kiro_cli_precisa_de_kiro_home_ou_agente_no_repo_para_encontrar_agente(self):
+        """Documenta que o kiro-cli SÓ encontra o agente se KIRO_HOME ou arquivo no repo forem usados.
+
+        A documentação do kiro-cli informa:
+        - Local: <cwd>/.kiro/agents/<nome>.json   (precedência)
+        - Global: ~/.kiro/agents/<nome>.json        (fallback)
+        - KIRO_HOME sobrescreve ~/.kiro como diretório de agentes globais
+
+        Para a esteira funcionar corretamente, uma das seguintes condições deve ser verdadeira:
+        (a) O arquivo é gerado em ~/.kiro/agents/ (global) — risco de colisão entre projetos
+        (b) KIRO_HOME é configurado para a esteira e passado ao subprocess do kiro-cli
+        (c) O arquivo é gerado no <repo>/.kiro/agents/ (local ao repo) — mais isolado
+
+        Este teste FALHA na implementação atual, documentando o bug de localização.
+        O adapter passa --agent mas não configura KIRO_HOME nem gera o arquivo no repo.
+        """
+        from src.adapters.kiro_cli_agent import KiroCliAgent
+        from src.core.agent import AgentParams
+
+        # Simula CONTEXT.md na esteira (não no repo)
+        ctx_file = self.esteira_dir / ".pipe" / "CONTEXT.md"
+        ctx_file.write_text("# Contexto\nRESTRIÇÕES\n")
+
+        params = AgentParams(
+            platform="kiro-cli",
+            agent_id="dev",
+            agent_name="engineering",
+            model="claude-sonnet-4",
+            issue_id="1",
+            board_id="task",
+            col_id="doing",
+            prompt="Execute a tarefa.",
+            work_dir=str(self.repo_dir),  # cwd do kiro-cli é o repo
+        )
+
+        captured_envs = []
+        captured_cmds = []
+
+        def fake_run(cmd, **kwargs):
+            captured_envs.append(kwargs.get("env", {}))
+            captured_cmds.extend(cmd)
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            r.stderr = ""
+            return r
+
+        agent = KiroCliAgent()
+
+        with patch("subprocess.run", side_effect=fake_run), \
+             patch("src.adapters.kiro_cli_agent.SessionIndex") as mock_idx, \
+             patch("src.adapters.kiro_cli_agent.CONTEXT_FILE", ctx_file, create=True):
+            mock_idx.return_value.get.return_value = None
+            mock_idx.return_value.set.return_value = None
+            agent._run(params, self.repo_dir)
+
+        # Quando --agent é passado, o subprocess precisa de KIRO_HOME apontando
+        # para o diretório que contém .kiro/agents/pipe_context.json (a esteira),
+        # OU o arquivo precisa estar em <repo>/.kiro/agents/.
+        if "--agent" in captured_cmds:
+            env_passed = captured_envs[0] if captured_envs else {}
+            kiro_home = env_passed.get("KIRO_HOME", "")
+            agent_in_repo = (self.repo_dir / ".kiro" / "agents" / "pipe_context.json").exists()
+            agente_em_local_acessivel = bool(kiro_home) or agent_in_repo
+            self.assertTrue(
+                agente_em_local_acessivel,
+                "BUG: O adapter passa --agent mas não garante que o arquivo de agente seja "
+                "encontrado pelo kiro-cli. KIRO_HOME não está configurado no env do subprocess "
+                "e o arquivo não está em <repo>/.kiro/agents/. "
+                "O kiro-cli busca agentes locais em <cwd>/.kiro/agents/ e globais em ~/.kiro/agents/. "
+                "Solução A: passar KIRO_HOME=<dir_esteira> no env do subprocess. "
+                "Solução B: gerar o arquivo em <repo>/.kiro/agents/ (mais isolado)."
+            )
+
+    def test_nome_do_arquivo_de_agente_corresponde_ao_argumento_agent(self):
+        """O nome do arquivo JSON deve corresponder ao valor passado em --agent.
+
+        Segundo documentação: 'The filename (without .json) becomes the agent's name'
+        e o kiro-cli busca o agente por nome no diretório de agentes.
+        Se o arquivo se chama pipe_context.json, o argumento deve ser --agent pipe_context.
+        """
+        ctx_file = self.esteira_dir / ".pipe" / "CONTEXT.md"
+        agent_file = self.esteira_dir / ".kiro" / "agents" / "pipe_context.json"
+
+        from src.core.context_generator import generate_context, _AGENT_NAME
+        with patch("src.core.context_generator.PIPE_FILE", self.esteira_dir / "pipe.yml"), \
+             patch("src.core.context_generator.CONTEXT_FILE", ctx_file), \
+             patch("src.core.context_generator.AGENT_FILE", agent_file, create=True):
+            generate_context(_make_config())
+
+        self.assertTrue(agent_file.exists(), "Arquivo de agente não foi gerado")
+
+        # Nome do arquivo sem extensão deve ser o mesmo passado ao --agent
+        agent_filename_stem = agent_file.stem  # "pipe_context"
+        self.assertEqual(
+            agent_filename_stem, _AGENT_NAME,
+            f"Nome do arquivo ({agent_filename_stem}) difere do argumento --agent ({_AGENT_NAME}). "
+            "O kiro-cli usa o nome do arquivo (sem .json) para identificar o agente."
+        )
+
+    def test_campo_name_no_json_coerente_com_nome_do_arquivo(self):
+        """O campo 'name' no JSON deve ser coerente com o nome do arquivo.
+
+        Segundo documentação: 'The name field specifies the name of the agent.
+        This is optional, derived from filename if not specified.'
+        Se explicitado, deve ser igual ao nome do arquivo para evitar confusão.
+        """
+        ctx_file = self.esteira_dir / ".pipe" / "CONTEXT.md"
+        agent_file = self.esteira_dir / ".kiro" / "agents" / "pipe_context.json"
+        # Garante que o CONTEXT.md não existe para forçar geração
+        if ctx_file.exists():
+            ctx_file.unlink()
+
+        from src.core.context_generator import generate_context
+        with patch("src.core.context_generator.PIPE_FILE", self.esteira_dir / "pipe.yml"), \
+             patch("src.core.context_generator.CONTEXT_FILE", ctx_file), \
+             patch("src.core.context_generator.AGENT_FILE", agent_file, create=True):
+            generate_context(_make_config())
+
+        self.assertTrue(agent_file.exists(), "Arquivo de agente não foi gerado")
+
+        data = json.loads(agent_file.read_text())
+        name_in_json = data.get("name", "")
+        agent_filename_stem = agent_file.stem
+
+        self.assertEqual(
+            name_in_json, agent_filename_stem,
+            f"Campo 'name' no JSON ('{name_in_json}') difere do nome do arquivo "
+            f"('{agent_filename_stem}'). Ambos devem ser iguais para evitar ambiguidade."
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
