@@ -9,7 +9,7 @@ from pathlib import Path
 from src.core.agent import AgentPort, AgentParams
 from src.core.log import log
 from src.core.session import SessionIndex
-from src.core.context_generator import CONTEXT_FILE
+from src.core.context_generator import CONTEXT_FILE, AGENT_FILE
 
 _tz = timezone(timedelta(hours=-3))
 
@@ -58,7 +58,14 @@ class KiroCliAgent(AgentPort):
         o ciclo de vida das sessões — o kiro-cli cuida disso.
         """
         # Sem cor nos logs do kiro-cli (facilita parsing/limpeza).
-        env = {**os.environ, "KIRO_LOG_NO_COLOR": "1"}
+        # KIRO_HOME: aponta o kiro-cli para o diretório de configuração global
+        # da esteira (.kiro/agents/pipe_context.json). O kiro-cli é executado
+        # com cwd=repo/<repo_id>, onde buscaria agentes locais em
+        # repo/<repo_id>/.kiro/agents/ — diretório diferente do gerado no startup.
+        # Com KIRO_HOME apontando para o diretório raiz da esteira (onde está
+        # .kiro/), o kiro-cli encontra o arquivo de agente como agente global.
+        kiro_home = str(AGENT_FILE.parent.parent.parent)
+        env = {**os.environ, "KIRO_LOG_NO_COLOR": "1", "KIRO_HOME": kiro_home}
 
         cmd = [
             "kiro-cli", "chat",

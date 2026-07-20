@@ -649,8 +649,8 @@ class TestLocalizacaoArquivoDeAgente(unittest.TestCase):
         (b) KIRO_HOME é configurado para a esteira e passado ao subprocess do kiro-cli
         (c) O arquivo é gerado no <repo>/.kiro/agents/ (local ao repo) — mais isolado
 
-        Este teste FALHA na implementação atual, documentando o bug de localização.
-        O adapter passa --agent mas não configura KIRO_HOME nem gera o arquivo no repo.
+        Este teste verifica que o adapter configura KIRO_HOME corretamente no env do subprocess
+        para que o kiro-cli encontre o arquivo de agente.
         """
         from src.adapters.kiro_cli_agent import KiroCliAgent
         from src.core.agent import AgentParams
@@ -658,6 +658,11 @@ class TestLocalizacaoArquivoDeAgente(unittest.TestCase):
         # Simula CONTEXT.md na esteira (não no repo)
         ctx_file = self.esteira_dir / ".pipe" / "CONTEXT.md"
         ctx_file.write_text("# Contexto\nRESTRIÇÕES\n")
+
+        # Arquivo de agente gerado no diretório da esteira
+        agent_file = self.esteira_dir / ".kiro" / "agents" / "pipe_context.json"
+        agent_file.parent.mkdir(parents=True, exist_ok=True)
+        agent_file.write_text('{"name": "pipe_context", "prompt": "context"}')
 
         params = AgentParams(
             platform="kiro-cli",
@@ -687,7 +692,8 @@ class TestLocalizacaoArquivoDeAgente(unittest.TestCase):
 
         with patch("subprocess.run", side_effect=fake_run), \
              patch("src.adapters.kiro_cli_agent.SessionIndex") as mock_idx, \
-             patch("src.adapters.kiro_cli_agent.CONTEXT_FILE", ctx_file, create=True):
+             patch("src.adapters.kiro_cli_agent.CONTEXT_FILE", ctx_file, create=True), \
+             patch("src.adapters.kiro_cli_agent.AGENT_FILE", agent_file, create=True):
             mock_idx.return_value.get.return_value = None
             mock_idx.return_value.set.return_value = None
             agent._run(params, self.repo_dir)
