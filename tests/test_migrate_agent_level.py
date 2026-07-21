@@ -8,6 +8,7 @@ Cobre:
 - Issue sem body_path válido → ignora.
 - Contagem correta de migradas.
 - Snapshot é atualizado (status=change-up) para issues enfileiradas.
+- Corrida de ordenação: CHANGE_UP de migração deve preceder CHANGE_DOWN da mesma issue.
 """
 
 import json
@@ -19,6 +20,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from src.core.board import ChangeItem, SyncEvent
 from src.core.change_queue import ChangeQueue
 from src.core.snapshot import BOARDS_DIR, Snapshot
 from src.core.sync import migrate_agent_level_labels
@@ -229,3 +231,46 @@ def test_mistura_migradas_e_nao_migradas():
 
     assert count == 1
     assert queue.size() == 1
+
+
+# ── Teste de corrida de ordenação ────────────────────────────────────────────
+
+def test_migracao_antes_de_change_down_garante_ordem_fifo():
+    """CHANGE_UP de migração deve preceder CHANGE_DOWN da mesma issue na fila.
+
+    Simula o cenário de corrida apontado no code review: uma issue legada
+    (com /agent_level no body, sem label no board) é também alterada
+    remotamente no mesmo ciclo de full sync.
+
+    Quando migrate_agent_level_labels() é chamado ANTES de detect_board_changes,
+    o CHANGE_UP entra primeiro na fila. O processamento FIFO garante que:
+      1. CHANGE_UP sobe a label agent-level-* para o board.
+      2. CHANGE_DOWN relê a issue com a label já presente → preserva o nível.
+
+    O teste verifica apenas a precondição sob controle do código corrigido:
+    o CHANGE_UP está na posição 0 da fila e o CHANGE_DOWN está na posição 1.
+    """
+    board_id = "task"
+    board_dir = _make_board(board_id)
+    body = _make_body(board_dir, "todo", "99", "@---\n/agent_level high\n")
+    _add_issue(board_id, "99", body, labels=[])  # sem label no snapshot
+
+    queue = ChangeQueue()
+
+    # Passo 1: migração enfileira CHANGE_UP (simula board_full_sync após reordenação)
+    count = migrate_agent_level_labels(board_id, queue)
+    assert count == 1, "migração deve enfileirar 1 issue"
+
+    # Passo 2: enfileira CHANGE_DOWN manualmente (simula detect_board_changes)
+    change_down = ChangeItem.of(SyncEvent.CHANGE_DOWN, id="99", board=board_id, fullsync=True)
+    queue.add(change_down)
+
+    # Verifica a ordem: CHANGE_UP (posição 0) antes do CHANGE_DOWN (posição 1)
+    items = queue._read()
+    assert len(items) == 2, "fila deve ter exatamente 2 itens"
+    assert items[0].event == SyncEvent.CHANGE_UP.value, (
+        f"posição 0 deve ser CHANGE_UP, mas é {items[0].event!r}"
+    )
+    assert items[1].event == SyncEvent.CHANGE_DOWN.value, (
+        f"posição 1 deve ser CHANGE_DOWN, mas é {items[1].event!r}"
+    )
