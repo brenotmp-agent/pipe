@@ -1,5 +1,6 @@
 """Agent core - port para execução de agentes."""
 
+import fnmatch
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -11,6 +12,102 @@ from src.core.snapshot import BOARDS_DIR
 REPO_DIR = Path("repo")
 
 CONTEXTS_DIR = Path("contexts")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Proteção de arquivos de estado interno
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Lista centralizada de padrões glob de arquivos de estado interno da esteira.
+# Nenhum desses paths deve jamais aparecer em prompts enviados a agentes.
+# Padrões seguem a sintaxe fnmatch (glob simples, sem separadores de diretório
+# implícitos). Para paths absolutos, a verificação é feita comparando o
+# sufixo do path com o padrão sem o prefixo de diretório variável.
+#
+# Referência: [Incidente Issue Fantasma] Correção 1 — issue #8.
+PROTECTED_PATHS: list[str] = [
+    ".pipe/boards/*/snapshot.json",
+    ".pipe/changeQueue.json",
+    ".pipe/throttle.json",
+    ".pipe/throttle-*.json",
+]
+
+
+def _matches_protected(token: str, pattern: str) -> bool:
+    """Verifica se um token de texto corresponde a um padrão protegido.
+
+    Estratégia:
+    - Teste direto com fnmatch (cobre paths relativos exatos).
+    - Para padrões com ``*`` interno (ex.: ``boards/*/snapshot.json``), divide
+      o padrão em prefixo fixo e sufixo fixo e verifica se o token contém o
+      sufixo (cobre paths absolutos e relativos com subdiretórios variáveis).
+    - Para padrões simples sem ``*`` no meio, verifica se o token termina com
+      o padrão inteiro (cobre paths absolutos).
+    """
+    # Teste direto (path relativo exato ou com glob no nível de arquivo)
+    if fnmatch.fnmatch(token, pattern):
+        return True
+
+    # Para cobertura de paths absolutos: verifica se o token contém uma
+    # sequência que case com o padrão. Divide em segmentos e testa o sufixo.
+    parts = pattern.split("/")
+    # Pega a parte do padrão a partir do primeiro segmento com glob ou fixo
+    # que identifica o arquivo de forma única (último segmento com extensão).
+    # Estratégia: encontra o sufixo mais longo sem '*' no início.
+    suffix_parts = []
+    for part in reversed(parts):
+        suffix_parts.insert(0, part)
+        if "*" not in part:
+            # Continua acumulando até encontrar um segmento com glob
+            candidate = "/".join(suffix_parts)
+            if fnmatch.fnmatch(token.split("/")[-len(suffix_parts):][0]
+                               if len(token.split("/")) >= len(suffix_parts)
+                               else "", suffix_parts[0]):
+                # Verifica se o final do token casa com os últimos N segmentos
+                token_parts = token.replace("\\", "/").split("/")
+                n = len(suffix_parts)
+                if len(token_parts) >= n:
+                    tail = "/".join(token_parts[-n:])
+                    if fnmatch.fnmatch(tail, candidate):
+                        return True
+            break
+        else:
+            # Há glob neste segmento; o que importa é o sufixo após o glob
+            # Não continua acumulando para trás além desse ponto
+            break
+
+    return False
+
+
+def _assert_no_protected(prompt: str) -> None:
+    """Verifica que nenhum path protegido (PROTECTED_PATHS) aparece no prompt.
+
+    Levanta ValueError identificando o arquivo protegido encontrado.
+
+    A verificação tokeniza o prompt palavra a palavra e avalia cada token
+    contra os padrões em PROTECTED_PATHS via fnmatch. Para padrões com
+    componentes de diretório (ex.: ``.pipe/boards/*/snapshot.json``), o token
+    é testado tanto diretamente quanto pela correspondência do sufixo — o que
+    cobre tanto paths relativos quanto absolutos.
+
+    Não dispara falsos positivos para substrings sem extensão .json ou nomes
+    similares (ex.: ``snapshots/``, ``snap.py``, ``throttle-config.yaml``).
+    """
+    # Separa o prompt em tokens (palavras, paths, qualquer sequência não-espaço)
+    tokens = prompt.split()
+
+    for token in tokens:
+        # Remove pontuação final que não faz parte do path (vírgula, ponto final…)
+        token = token.rstrip(".,;:\"'`)")
+
+        for pattern in PROTECTED_PATHS:
+            if _matches_protected(token, pattern):
+                # Extrai o nome do arquivo do padrão para a mensagem de erro.
+                filename = pattern.rsplit("/", 1)[-1]
+                raise ValueError(
+                    f"Prompt contém referência a arquivo de estado protegido "
+                    f"'{filename}' (padrão: '{pattern}'). "
+                    f"Token encontrado: '{token}'"
+                )
 
 
 def agent_level(issue: dict) -> str | None:
@@ -235,4 +332,10 @@ def build_prompt(config: dict, task: dict) -> str:
         lines.append(f"- **{condition}** → `mv {issue_dir}/{slug}-*.md {target_dir}/`")
     lines.append("")
 
-    return "\n".join(lines)
+    prompt = "\n".join(lines)
+
+    # Guard de segurança: garante que nenhum arquivo de estado interno da
+    # esteira vaze no prompt enviado ao agente.
+    _assert_no_protected(prompt)
+
+    return prompt
