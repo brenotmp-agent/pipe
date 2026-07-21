@@ -9,6 +9,7 @@ from pathlib import Path
 from src.core.agent import AgentPort, AgentParams
 from src.core.log import log
 from src.core.session import SessionIndex
+from src.core.context_generator import CONTEXT_FILE, AGENT_FILE
 
 _tz = timezone(timedelta(hours=-3))
 
@@ -57,7 +58,19 @@ class KiroCliAgent(AgentPort):
         o ciclo de vida das sessões — o kiro-cli cuida disso.
         """
         # Sem cor nos logs do kiro-cli (facilita parsing/limpeza).
-        env = {**os.environ, "KIRO_LOG_NO_COLOR": "1"}
+        # KIRO_HOME: aponta o kiro-cli para o diretório .kiro da esteira.
+        # O kiro-cli é executado com cwd=repo/<repo_id>, onde buscaria agentes
+        # locais em repo/<repo_id>/.kiro/agents/ — diretório diferente do gerado
+        # no startup. Com KIRO_HOME=<esteira>/.kiro, o kiro-cli encontra
+        # <KIRO_HOME>/agents/pipe_context.json como agente global.
+        #
+        # AGENT_FILE é relativo no módulo (Path(".kiro/agents/pipe_context.json")),
+        # por isso usamos .resolve() para obter o path absoluto antes de subir
+        # ao diretório pai (.kiro). Sem .resolve(), .parent.parent em path relativo
+        # resultaria em "." — que o subprocess resolveria contra seu próprio cwd
+        # (o repo), apontando para o lugar errado.
+        kiro_home = str(AGENT_FILE.resolve().parent.parent)  # <esteira>/.kiro
+        env = {**os.environ, "KIRO_LOG_NO_COLOR": "1", "KIRO_HOME": kiro_home}
 
         cmd = [
             "kiro-cli", "chat",
@@ -66,6 +79,12 @@ class KiroCliAgent(AgentPort):
         ]
         if params.model:
             cmd += ["--model", params.model]
+
+        # Injeta o contexto do sistema via --agent (quando CONTEXT.md existe).
+        # O arquivo .kiro/agents/pipe_context.json foi gerado pelo startup a
+        # partir do pipe.yml e contém as instruções explícitas para o agente.
+        if CONTEXT_FILE.exists():
+            cmd += ["--agent", "pipe_context"]
 
         # Retoma a sessão anterior se ainda existir.
         index = SessionIndex()
