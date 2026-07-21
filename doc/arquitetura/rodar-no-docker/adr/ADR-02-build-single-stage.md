@@ -34,3 +34,5 @@ Usar um **único stage** de build.
 - Um Dockerfile linear, fácil de manter.
 - A redução de tamanho vem de `--no-install-recommends`, limpeza de
   `/var/lib/apt/lists` e `pip --no-cache-dir`, não de stages.
+- O passo de obtenção do código (`git clone`, ADR-07) é mais um `RUN` linear no
+  mesmo stage — não introduz necessidade de multi-stage.

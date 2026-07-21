@@ -1,18 +1,22 @@
 # Arquitetura — Rodar no Docker
 
-Status: draft
+Status: draft (revisão 2)
 Owner: arquitetura
-Last updated: 2026-07-07
+Last updated: 2026-07-21
 
 Documentação arquitetural da feature "Rodar no Docker" (issue #1), com foco na
 story-base **US-01 — Empacotar a esteira em imagem Docker** (issue #16).
+
+> **Revisão 2 (2026-07-21):** o código da esteira passa a ser obtido por
+> `git clone` no build (ADR-07), no lugar do `COPY src/`, atendendo à validação
+> que pedia que o container baixasse o código do GitHub sem download manual.
 
 ## Índice
 
 - [`arquitetura.md`](arquitetura.md) — visão da solução, estrutura da imagem,
   Dockerfile de referência, rastreabilidade e orientações para as demais
   stories.
-- [`adr/`](adr/) — Architecture Decision Records (ADR-01 a ADR-06).
+- [`adr/`](adr/) — Architecture Decision Records (ADR-01 a ADR-07).
 
 ## Catálogo de requisitos (formalização)
 
@@ -49,16 +53,17 @@ rastreabilidade única à feature.
 |----|-------|-----------|
 | R-1 | Autenticação headless do kiro-cli depende de `KIRO_API_KEY` (plano Kiro Pro+) e só é verificável em runtime. | Smoke test de build valida apenas o binário (`kiro-cli --version`); a autenticação é validada no primeiro ciclo (US-05). |
 | R-2 | O kiro-cli **não tem URL versionada** — o download aponta sempre para `/latest/`. | ADR-04: registrar a versão validada em `ARG` + comentário e verificar o checksum do artefato no build. |
+| R-3 | O build depende de acesso de leitura ao repo **privado** da esteira (SSH) para o `git clone` (ADR-07). | Reuso da `PIPE_SSH_KEY_FILE` como secret efêmero de BuildKit; `StrictHostKeyChecking=accept-new`; falha clara do clone se a chave não tiver acesso. |
 
 ## Rastreabilidade rápida
 
 | Requisito | Atendido por |
 |-----------|--------------|
-| RF-01 | ADR-01, ADR-02, ADR-05; Dockerfile de referência (CMD `python -m src`) |
-| RNF-01 | ADR-06; `.dockerignore` + COPY seletivo de `src/` |
+| RF-01 | ADR-01, ADR-02, ADR-05, ADR-07; Dockerfile de referência (CMD `python -m src`) |
+| RNF-01 | ADR-06; ADR-07 (`.dockerignore` nega todo o contexto + secret efêmero no clone) |
 | RNF-02 | ADR-01 |
 | RNF-03 | ADR-06 |
 | RNF-04 | ADR-06 (orquestração — US-03) |
-| RNF-05 | ADR-03, ADR-04 |
+| RNF-05 | ADR-03, ADR-04, ADR-07 (pin de `PIPE_REF` por tag/SHA) |
 | D-01 | Todas as ADRs (nenhuma toca o domínio `src/core`) |
 | D-02 | ADR-04 |

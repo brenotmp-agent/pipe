@@ -20,6 +20,7 @@ Pinar cada dependência pelo mecanismo apropriado:
 | `gh` (GitHub CLI) | Repositório APT oficial + `apt-get install gh=<versao>`. |
 | `git`, `openssh-client`, `ca-certificates`, `curl`, `unzip` | Versões do Debian da base (pin explícito `pkg=<versao>` quando a estabilidade exigir). |
 | `kiro-cli` | URL `/latest/` (sem versão) → `ARG KIRO_CLI_VERSION` documentando a versão validada + verificação `sha256sum` do zip (ver ADR-03, R-2). |
+| Código da esteira (`src/`) | `ARG PIPE_REF` no `git clone` (ADR-07). `main` = "última versão" no momento do build; para reprodutibilidade estrita, apontar `PIPE_REF` para uma **tag ou SHA**. |
 
 ## Justificativa
 

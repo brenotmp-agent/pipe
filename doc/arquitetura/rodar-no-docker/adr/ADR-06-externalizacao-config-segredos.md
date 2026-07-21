@@ -14,7 +14,8 @@ na imagem (RNF-01), e trocar uma credencial não pode exigir rebuild (RNF-03).
 ## Decisão
 
 **Nada de ambiente ou segredo entra na imagem.** A imagem contém apenas código
-(`src/`) e binários de runtime. Tudo o mais é injetado no arranque do container:
+(`src/`, obtido por `git clone` no build — ADR-07) e binários de runtime. Tudo
+o mais é injetado no arranque do container:
 
 | Tipo | Como é injetado | Momento |
 |------|-----------------|---------|
@@ -23,8 +24,10 @@ na imagem (RNF-01), e trocar uma credencial não pode exigir rebuild (RNF-03).
 | `GH_TOKEN`, `KIRO_API_KEY` | variável de ambiente via `.env` do host (não versionado) | runtime (US-02) |
 | Estado (`repo/`, `logs/`, `.pipe/`, `~/.kiro`, `~/.local/share/kiro-cli`) | volumes nomeados | runtime (US-02) |
 
-Garantias na imagem (US-01): `.dockerignore` com allow-list de `src/` e `COPY`
-seletivo impedem que qualquer segredo/estado local entre no contexto de build.
+Garantias na imagem (US-01): `.dockerignore` nega **todo** o contexto de build
+(`*`), de modo que nenhum segredo/estado local chega ao daemon. O código vem por
+`git clone` autenticado com um **secret efêmero de BuildKit** que não persiste em
+camadas (ADR-07).
 
 ## Justificativa
 

@@ -1,9 +1,16 @@
 # Arquitetura da Solução — Rodar no Docker
 
-Status: draft
+Status: draft (revisão 2)
 Owner: arquitetura
-Last updated: 2026-07-07
+Last updated: 2026-07-21
 Escopo primário: US-01 (issue #16). Orientações para US-02..US-06.
+
+> **Revisão 2 (2026-07-21):** a validação apontou que o `COPY src/` obrigava o
+> operador a ter o código da esteira já baixado no host. A arquitetura foi
+> ajustada: **o código passa a ser obtido por `git clone` do próprio repositório
+> no build da imagem** (não mais copiado do host). Detalhes em ADR-07; o
+> Dockerfile de referência (§4), a estrutura de camadas (§3.2), o `.dockerignore`
+> (§4.1) e a verificação (§7) foram atualizados.
 
 ## 1. Princípio norteador
 
@@ -20,7 +27,9 @@ custo de manutenção não se paga.
 
 O que **não** muda: a lógica de negócio em `src/core` e `src/adapters`
 permanece intacta (D-01). O container apenas empacota o runtime e move para
-fora tudo que é ambiente e segredo.
+fora tudo que é ambiente e segredo. O **código** da esteira também não é mais um
+insumo local: a imagem o busca por `git clone` no build (ADR-07), de modo que o
+operador não precisa manter o repositório clonado no host.
 
 ## 2. Topologia alvo
 
@@ -61,7 +70,7 @@ imagem em si é descartável e reprodutível.
 
 ```
 /app                      WORKDIR
-├── src/                  código da esteira (COPY — única coisa copiada)
+├── src/                  código da esteira (git clone no build — ADR-07)
 ├── pipe.yml              (volume ro — US-03, não copiado)
 ├── contexts/             (volume ro — US-03, não copiado)
 ├── repo/                 (volume nomeado — clones em runtime)
@@ -91,7 +100,14 @@ Da mais estável para a mais volátil, para maximizar cache de build:
 5. Criação do usuário `pipe` e troca para não-root (ADR-05).
 6. kiro-cli via zip installer para `~/.local/bin` + smoke test (ADR-03, R-2).
 7. Variáveis de ambiente (`PYTHONUNBUFFERED`, `XDG_RUNTIME_DIR`, `PATH`).
-8. `COPY src/` (camada mais volátil — muda a cada release da esteira).
+8. `git clone` do `src/` a partir do repositório da esteira (camada mais
+   volátil — muda a cada release; invalidada por `--build-arg PIPE_REF` ou pela
+   opção `--no-cache` — ADR-07).
+
+> O `git` (passo 2) já estava na imagem por ser dependência de runtime da
+> esteira; ele também serve ao clone de build. O segredo SSH usado no clone é
+> montado de forma **efêmera** via BuildKit e não persiste em nenhuma camada
+> (ADR-07, RNF-01).
 
 ## 4. Dockerfile de referência
 
@@ -100,6 +116,7 @@ Da mais estável para a mais volátil, para maximizar cache de build:
 > definidas/validadas na implementação e registradas conforme ADR-04.
 
 ```dockerfile
+# syntax=docker/dockerfile:1
 FROM python:3.12-slim
 
 # (2) Dependências de sistema — versões pinadas (D-02)
@@ -145,27 +162,48 @@ ENV PYTHONUNBUFFERED=1 \
     XDG_RUNTIME_DIR=/tmp \
     PATH=/home/pipe/.local/bin:$PATH
 
-# (8) Código da esteira — única coisa copiada (RNF-01, AC-02)
-COPY --chown=pipe:pipe src/ /app/src/
+# (8) Código da esteira — CLONADO do GitHub no build (não copiado do host) — ADR-07
+#     Repo privado por SSH: a chave é montada como secret EFÊMERO do BuildKit
+#     (nunca vira camada — RNF-01). Reusa a mesma PIPE_SSH_KEY_FILE do runtime.
+ARG PIPE_REPO=git@github.com:brenotmp-agent/pipe.git
+ARG PIPE_REF=main   # branch/tag; para pinagem forte, use um SHA (ver ADR-04)
+RUN --mount=type=secret,id=ssh_key,uid=1000 \
+    GIT_SSH_COMMAND='ssh -i /run/secrets/ssh_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new' \
+    git clone --depth 1 --branch "$PIPE_REF" "$PIPE_REPO" /tmp/esteira \
+    && cp -r /tmp/esteira/src /app/src \
+    && rm -rf /tmp/esteira
 
 # Entrypoint em exec form: python vira PID 1 e recebe sinais diretamente
 CMD ["python", "-m", "src"]
 ```
 
+> **Comando de build** (BuildKit obrigatório para `--mount`/`--secret`):
+>
+> ```bash
+> DOCKER_BUILDKIT=1 docker build \
+>   --secret id=ssh_key,src="$PIPE_SSH_KEY_FILE" \
+>   --build-arg PIPE_REF=main \
+>   -t esteira .
+> ```
+>
+> O operador não precisa clonar a esteira à mão: basta o `Dockerfile` e acesso
+> de leitura ao repositório (a mesma chave SSH que a esteira já usa). Para uma
+> versão específica, passe `--build-arg PIPE_REF=<tag|sha>`.
+
 ### 4.1 `.dockerignore`
 
-Complementa o COPY seletivo para garantir RNF-01 (nenhum segredo/estado local
-vaza para o contexto de build):
+Como o código passa a vir por `git clone` (ADR-07), **nada** do host precisa
+entrar no contexto de build. O `.dockerignore` nega tudo — só o próprio
+`Dockerfile` chega ao daemon:
 
 ```
 *
-!src/
 ```
 
-Lista de negação total com allow-list de `src/` é a forma mais segura: nada
-além de `src/` chega ao daemon de build, então `pipe.yml`, `contexts/`,
+Essa negação total é a garantia mais forte de RNF-01: `pipe.yml`, `contexts/`,
 `repo/`, `logs/`, `.pipe/`, `.ssh`, `.env` e qualquer credencial ficam de fora
-por construção.
+por construção, e o segredo SSH do clone é montado de forma efêmera (não vem do
+contexto de build nem vira camada).
 
 ## 5. Fluxo de arranque no container
 
@@ -216,7 +254,7 @@ a Arquitetura. Posição arquitetural:
 | AC (US-01) | Verificação |
 |-----------|-------------|
 | AC-01 base+conteúdo | `docker build` conclui; `docker run --rm img sh -c 'git --version && gh --version && kiro-cli --version && python -c "import yaml"'` |
-| AC-02 código | `docker run --rm img ls /app` mostra só `src/`; `pipe.yml`/`contexts/` ausentes |
+| AC-02 código | `docker run --rm img ls /app` mostra só `src/` (obtido por `git clone` no build — ADR-07); `pipe.yml`/`contexts/` ausentes. Opcional: comparar `src/` com o `PIPE_REF` esperado |
 | AC-03 segredos | `docker history --no-trunc img` e `docker inspect img` sem valores sensíveis |
 | AC-04 não-root | `docker run --rm img id` → `uid=1000(pipe)`; `~/.ssh` gravável |
 | AC-05 env | `docker inspect` mostra `PYTHONUNBUFFERED=1` |
@@ -232,3 +270,4 @@ Ver `adr/`:
 - ADR-04 — Pinagem de versões e reprodutibilidade
 - ADR-05 — Usuário não-root com `$HOME` gravável
 - ADR-06 — Externalização de configuração e segredos
+- ADR-07 — Aquisição do código via `git clone` no build (não `COPY`)
