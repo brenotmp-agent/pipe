@@ -1,6 +1,19 @@
 # Contexto e Decisões — Esteira Agêntica v2
 
-Data: 2026-06-28
+Data: 2026-07-02
+
+## Versionamento
+
+A versão do projeto é definida em `src/core/version.py` (variável `VERSION`).
+Segue semântico: `MAJOR.MINOR.PATCH`.
+
+**Regra: toda alteração no código deve incrementar a versão antes do commit.**
+
+- PATCH: correções de bugs, ajustes menores
+- MINOR: funcionalidades novas, melhorias compatíveis
+- MAJOR: mudanças incompatíveis (breaking changes)
+
+A versão é exibida no log ao iniciar a esteira.
 
 ## Visão Geral
 
@@ -18,6 +31,7 @@ src/
 │   ├── commands.py     # Comandos @--- no body (IssueCommands, parse/serialize)
 │   ├── change_queue.py # Fila persistente de sincronismo (at-least-once)
 │   ├── snapshot.py     # Snapshot por board
+│   ├── session.py      # Índice de sessões do agente (.pipe/sessions.json)
 │   └── sync.py         # Sincronização local ↔ board (detect + apply)
 ├── adapters/           # Implementações de ports
 │   ├── github_board.py # Adapter para GitHub Projects V2
@@ -91,6 +105,97 @@ Gatilhos para `change-down`:
 - Deduplicação por `event + id + identifier + board`
 - Limpa no startup (issues com status pendente são re-enfileiradas do snapshot)
 
+#### Flag `fullsync`
+
+Cada `ChangeItem` tem um booleano `fullsync` (default `False`):
+- `fullsync=True` → reconcilia **todas** as propriedades + dependências
+  (blocked_by/blocks, que só existem via REST). Usado em todo create e no
+  full sync diário.
+- `fullsync=False` → apenas a chamada única de propriedades (sem deps). Usado
+  em `change-down` incremental.
+- **Upgrade (superset)**: se um item equivalente já está na fila sem fullsync
+  e um novo full chega, o existente é promovido a `fullsync=True` (não
+  duplica). `same_target` ignora `fullsync` na deduplicação.
+
+## Otimização de Sincronização (v1.3.0)
+
+Objetivo: minimizar chamadas ao GitHub por issue. Duas estratégias combinadas.
+
+### Down — chamada única enriquecida
+
+`get_issue(board_id, issue_id, fullsync=False)` traz, numa **única query
+GraphQL**: title, body, state, updatedAt, labels, parent, children (subIssues),
+coluna (Status) e isArchived (via `projectItems`). As dependências
+(blocked_by/blocks) **não existem no GraphQL** (só REST) e só são buscadas
+quando `fullsync=True` (2 chamadas REST via `_get_dependencies`).
+
+Em cada evento down, o estado real do board é gravado no snapshot
+(`_write_state_from_issue`). Sem fullsync, `blocked_by`/`blocks` são
+**preservados** do snapshot (não vêm na chamada única) para não apagar o bloco
+`@---` de deps ao reescrever o `-body.md`. A coluna também vem do `get_issue`,
+eliminando o `list_issues` (paginação completa) que era feito antes.
+
+### Up — comparar antes de escrever
+
+`Board.apply_commands(board_id, issue_id, cmds, known=None)` compara o estado
+desejado (comandos do arquivo) contra o estado conhecido (`known`, do
+snapshot) e **só chama o setter do atributo que realmente mudou**. Os setters
+(`set_parent/children/blocked_by/blocks`) recebem `known_current`, evitando os
+GETs internos de leitura-antes-de-escrita. Retorna deltas
+`{rel: {added, removed}}` das relações para o gatilho recíproco.
+
+Sem `known` (reconciliação completa), comporta-se como antes (chama todos os
+setters, que descobrem o estado atual sozinhos).
+
+### Gatilho de par recíproco (dependências)
+
+Relações são bidirecionais no GitHub:
+
+| Relação em X | Par recíproco em Y |
+|--------------|--------------------|
+| `X.parent = Y` | `Y.children ∋ X` |
+| `X.children ∋ Y` | `Y.parent = X` |
+| `X.blocked_by ∋ Y` | `Y.blocks ∋ X` |
+| `X.blocks ∋ Y` | `Y.blocked_by ∋ X` |
+
+Ao detectar relação **adicionada/removida** em X (up ou down),
+`_trigger_reciprocal_downs` enfileira um `change-down fullsync` do alvo Y
+**apenas se o snapshot de Y estiver inconsistente** com o par recíproco:
+- adicionada: enfileira se Y **ainda não** reciproca X;
+- removida: enfileira se Y **ainda** reciproca X.
+
+Essa checagem de par (`_reciprocates`) é a **condição de parada**: quando o
+alvo já está coerente, nada é enfileirado — evitando reação em cadeia infinita.
+O estado desejado/real é sempre gravado no snapshot **antes** de disparar o
+gatilho. Alvos não rastreados no snapshot são ignorados.
+
+### Throttle
+
+Toda requisição respeita o throttle. `_get_rate_limit_info` chama
+`self._throttle()` diretamente (não pode rotear por `_gh`, pois é invocado de
+dentro de `_handle_rate_limit`, que já roda dentro de `_gh`/`_gql` — causaria
+recursão). As demais chamadas `subprocess.run` ficam dentro de `_gh`/`_gql`,
+sempre após `_throttle()`.
+
+### Detecção de rate limit por transporte (não pelo corpo)
+
+`_handle_rate_limit` decide **exclusivamente** por sinais de transporte:
+
+- `headers["__status__"]` (linha de status HTTP parseada em `_parse_headers`)
+  igual a `403`/`429`;
+- `stderr` do `gh` mencionando "rate limit";
+- `_graphql_rate_limited(output)`, que parseia o JSON e olha apenas
+  `data.errors[].type` (`RATE_LIMITED`/`FORBIDDEN`) — a seção estruturada de
+  erros da API.
+
+O corpo (`output`/stdout) **nunca** é escaneado por substring. Regressão
+corrigida: a versão anterior fazia `combined = f"{output} {error}"` e buscava
+"rate limit" no corpo. Uma issue cujo título/body continha "Rate Limit" (ex.:
+issue de análise de custo de API) fazia toda `list_issues` (HTTP 200,
+`remaining` ~5000) ser classificada como *secondary rate limit*, escalando
+throttle até 64s e ativando penalty por horas sem nenhum limite real.
+Cobertura em `tests/test_rate_limit_detection.py`.
+
 ## Seleção de Tarefas (keep_task)
 
 - Boards ordenados por prioridade (menor = mais prioritário)
@@ -112,18 +217,62 @@ Gatilhos para `change-down`:
 | `create-merge` | Git Setup (criar) + Commit & Push + PR + Cleanup |
 | `no-branch` | Nenhum bloco de git |
 
-### Override de model/effort
+### Substituição de agente por nível (`override-agent`)
 
-Precedência: agente (default) < coluna (`effort`) < tag `/effort` no body (se `allow-overwrite: true`)
+A coluna tem um `agent` default. Se a issue traz `/agent_level <nível>` no bloco
+`@---` e `<nível>` é chave de `override-agent`, usa o agente do valor; senão, o
+`agent` default. Como cada agente carrega o próprio `model`, a troca de agente
+também troca o model. Resolvido em `agent.py` (`agent_level` +
+`resolve_agent_id`), validado em `config.py`.
 
 ### Contexto do agente
 
-Cada agente tem um arquivo em `contexts/<plataforma>/<agente>.md` que é enviado como contexto na execução. Validado no `check_config` (deve existir e não estar vazio).
+Cada agente tem um arquivo em `contexts/<plataforma>/<agente>.md` que é enviado
+como contexto na execução. Validado no `check_config` (deve existir e não
+estar vazio).
+
+O contexto é entregue **concatenado no início do input** do `kiro-cli chat`
+(via `_compose_input`: `contexto + "---" + prompt`), não via `--agent`. A
+execução usa o `~/.kiro` padrão do kiro-cli — não há `KIRO_HOME` isolado nem
+geração de configs de agente nativos.
+
+### Sessão do agente (continuidade entre execuções)
+
+Módulo `src/core/session.py` (`SessionIndex`), índice em `.pipe/sessions.json`.
+
+Objetivo: preservar o raciocínio do agente entre execuções da mesma issue —
+quando um agente pausa (ex.: `need_human`/`blocked_by`) e retoma depois, ele
+continua de onde parou em vez de recomeçar do zero.
+
+- **Chave por agente**: `<board>/<issue>/<agente>`. O mesmo agente atuando em
+  colunas diferentes retoma o próprio raciocínio; agentes distintos nunca
+  herdam a sessão um do outro. O agente da chave é o **resolvido**
+  (`resolve_agent_id`, considera override por `/agent_level`).
+- **Retomar**: antes de executar, se há `session_id` conhecido e ele **ainda
+  existe** no kiro-cli (`--list-sessions` do cwd), passa `--resume-id <id>`.
+- **Capturar**: após executar, pega o id da sessão mais recente do cwd
+  (topo de `--list-sessions`) e grava no índice. Cobre a primeira execução e o
+  caso de sessão descartada pelo kiro (que vira sessão nova). O loop é
+  sequencial, então a sessão do topo é seguramente a desta execução.
+- **Ciclo de vida**: a esteira **não** gerencia as sessões do kiro-cli (não
+  apaga, não limpa) — apenas aponta enquanto existirem. Se o `--resume-id`
+  referencia uma sessão inexistente, o kiro cria uma nova silenciosamente (sem
+  erro) e o índice é atualizado.
+
+Detalhes técnicos verificados no kiro-cli:
+- Sessões ficam em `~/.kiro/sessions/cli/{uuid}.json/.jsonl`; o índice é um
+  SQLite global (`~/.local/share/kiro-cli/`), **keyed por cwd**. Como cada repo
+  tem seu cwd (`repo/<repo_id>`), `--list-sessions` só enxerga as sessões
+  daquele repo — pipes diferentes não colidem.
+- O `session_id` **não** aparece no stdout headless; só é obtido via
+  `--list-sessions`.
+- `.pipe/sessions.json` sobrevive a reinícios (o `startup` só limpa a fila de
+  mudanças, não o índice de sessões).
 
 ### Log de execução
 
 Gerado em `<log.dir>/<issue_id>/<timestamp>.md` com 3 seções:
-- **Parâmetros**: plataforma, agente, model, effort, board, coluna, issue, context
+- **Parâmetros**: plataforma, agente, model, agent_level, board, coluna, issue, context
 - **Prompt**: prompt completo montado por `build_prompt`
 - **Chat**: diálogo (preenchido durante execução)
 
@@ -167,11 +316,12 @@ boards:
       <id-column>:
         name: <nome>
         agent: <id-agent>
-        effort: low|medium|high
+        override-agent: {<nível>: <id-agent>}
         gitevents: create|use|merge|create-merge|no-branch
-        target-prompt: <objetivo da etapa>
-        allow-overwrite: true|false
+        prompt: <objetivo da etapa>
         archive: true|false
+        on_in: [<token>, ...]
+        on_out: [<token>, ...]
         change:
           advance: <id-column>
           <condition>: <id-column>
@@ -200,7 +350,7 @@ Módulo `src/core/commands.py`. O body de uma issue pode terminar com um bloco
 de comandos separado por uma linha `@---`.
 
 - `IssueCommands`: dataclass com parent, children[], blocked_by[], blocks[],
-  labels[], effort, close, archive, need_human.
+  labels[], agent_level, close, archive, need_human.
 - `split_body(raw)` → `(body_limpo, IssueCommands)`. Múltiplos `@---`: o último
   vence, anteriores removidos.
 - `compose_body(body, cmds)` → body completo com bloco.
@@ -265,12 +415,23 @@ movimentações manuais.
 {
   "board": {"<col_id>": "<col_name>"},
   "issues": [
-    {"id": "1", "column": "...", "body_path": "...", "body_mtime": "...", "updated_at": "...", "status": "ok"}
+    {
+      "id": "1", "column": "...", "body_path": "...", "body_mtime": "...",
+      "updated_at": "...", "status": "ok",
+      "labels": [], "parent": null, "children": [],
+      "blocked_by": [], "blocks": [], "archived": false, "state": "open"
+    }
   ],
   "last_sync": null,
   "last_board_update": "..."
 }
 ```
+
+Os campos de estado (`labels`, `parent`, `children`, `blocked_by`, `blocks`,
+`archived`, `state`) guardam o **estado conhecido** da issue, usado para o diff
+no fluxo up e para a checagem de par recíproco. São gravados em todo evento
+up (estado desejado) e down (estado real do board). `status` é o campo de
+sincronismo (crash recovery), distinto de `state` (open/closed da issue).
 
 ## Pendências
 

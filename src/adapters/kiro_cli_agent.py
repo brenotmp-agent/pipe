@@ -8,6 +8,7 @@ from pathlib import Path
 
 from src.core.agent import AgentPort, AgentParams
 from src.core.log import log
+from src.core.session import SessionIndex
 
 _tz = timezone(timedelta(hours=-3))
 
@@ -16,6 +17,9 @@ _TIMEOUT = 3600
 
 # Remove sequências ANSI/escape do output capturado.
 _ANSI = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\].*?(?:\x07|\x1b\\)|\x1b[@-Z\\-_]")
+
+# UUID de sessão do kiro-cli (formato canônico 8-4-4-4-12).
+_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 
 
 class KiroCliAgent(AgentPort):
@@ -45,7 +49,16 @@ class KiroCliAgent(AgentPort):
         O cwd do processo é o clone do repositório alvo, garantindo que toda
         operação git/arquivos do agente fique confinada ao repo — nunca no
         diretório da esteira.
+
+        Sessão: se houver um session_id conhecido para (board, issue, agente) e
+        ele ainda existir no kiro-cli, retoma via `--resume-id` (o agente
+        recupera o raciocínio da execução anterior). Após executar, captura o id
+        da sessão (mais recente do cwd) e grava no índice. A esteira não gerencia
+        o ciclo de vida das sessões — o kiro-cli cuida disso.
         """
+        # Sem cor nos logs do kiro-cli (facilita parsing/limpeza).
+        env = {**os.environ, "KIRO_LOG_NO_COLOR": "1"}
+
         cmd = [
             "kiro-cli", "chat",
             "--no-interactive",
@@ -53,10 +66,17 @@ class KiroCliAgent(AgentPort):
         ]
         if params.model:
             cmd += ["--model", params.model]
-        cmd.append(self._compose_input(params))
 
-        # Sem cor nos logs do kiro-cli (facilita parsing/limpeza).
-        env = {**os.environ, "KIRO_LOG_NO_COLOR": "1"}
+        # Retoma a sessão anterior se ainda existir.
+        index = SessionIndex()
+        known_id = index.get(params.board_id, params.issue_id, params.agent_id)
+        if known_id and self._session_exists(known_id, work_dir, env):
+            cmd += ["--resume-id", known_id]
+            log.info("Agent", f"[{params.board_id}] #{params.issue_id} "
+                     f"retomando sessão {known_id}",
+                     session_id=known_id, agent=params.agent_id)
+
+        cmd.append(self._compose_input(params))
 
         try:
             result = subprocess.run(
@@ -72,10 +92,43 @@ class KiroCliAgent(AgentPort):
         except FileNotFoundError:
             return "[ERRO] kiro-cli não encontrado no PATH"
 
+        # Captura o id da sessão recém-usada (mais recente do cwd) e persiste.
+        # O loop da esteira é sequencial, então a sessão do topo é a desta
+        # execução (mesma quando retomada por id, nova quando criada agora).
+        current_id = self._latest_session_id(work_dir, env)
+        if current_id:
+            index.set(params.board_id, params.issue_id, params.agent_id, current_id)
+
         output = (result.stdout or "") + (result.stderr or "")
         if result.returncode != 0:
             output += f"\n[exit-code: {result.returncode}]"
         return output
+
+    def _list_session_ids(self, work_dir: Path, env: dict) -> list[str]:
+        """Lista os session_ids do cwd (mais recente primeiro) via kiro-cli."""
+        try:
+            result = subprocess.run(
+                ["kiro-cli", "chat", "--list-sessions"],
+                cwd=str(work_dir),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=env,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return []
+        if result.returncode != 0:
+            return []
+        return _UUID.findall(self._strip_ansi(result.stdout or ""))
+
+    def _session_exists(self, session_id: str, work_dir: Path, env: dict) -> bool:
+        """True se o session_id ainda existe no kiro-cli para este cwd."""
+        return session_id in self._list_session_ids(work_dir, env)
+
+    def _latest_session_id(self, work_dir: Path, env: dict) -> str | None:
+        """Retorna o session_id mais recente do cwd (topo da listagem)."""
+        ids = self._list_session_ids(work_dir, env)
+        return ids[0] if ids else None
 
     def _compose_input(self, params: AgentParams) -> str:
         """Monta o input do agente: contexto do papel + prompt da tarefa."""

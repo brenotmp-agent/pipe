@@ -93,6 +93,7 @@ src/
 │   ├── commands.py         # Comandos @--- no body (parse/serialize)
 │   ├── change_queue.py     # Fila persistente de sincronismo
 │   ├── snapshot.py         # Snapshot por board
+│   ├── session.py          # Índice de sessões do agente
 │   └── sync.py             # Sincronização local ↔ board
 ├── adapters/               # Implementações
 │   ├── github_board.py     # Adapter para GitHub Projects V2
@@ -100,6 +101,7 @@ src/
 └── __main__.py             # Entrada principal (orquestração)
 
 .pipe/boards/<id>/          # Diretórios de boards e snapshots
+.pipe/sessions.json         # Índice (board/issue/agente) → session_id
 contexts/<platform>/<agent>.md  # Contextos dos agentes
 repo/                       # Repositórios clonados
 logs/                       # Logs diários (JSON) + logs de agente (MD)
@@ -151,16 +153,51 @@ Se houve qualquer atividade (sync movimentou algo OU existe tarefa para executar
 | `create-merge` | Cria branch + cria PR |
 | `no-branch` | Sem operações de git |
 
-### Override de model/effort
+### Substituição de agente por nível (`override-agent`)
 
-Precedência: agente (default) < coluna (`effort`) < tag `/effort` no body (se `allow-overwrite: true`)
+Cada coluna define um agente default no atributo `agent`. Se a issue tiver uma
+tag `/agent_level <nível>` no bloco `@---` e esse `<nível>` for uma chave do
+mapa `override-agent` da coluna, a esteira usa o agente indicado no valor. Se
+não houver `/agent_level`, ou o nível não estiver mapeado, usa o `agent`
+default.
+
+Como cada agente carrega o próprio `model`, trocar o agente por nível troca
+também o model efetivo da execução.
+
+```yaml
+columns:
+  desenvolvimento:
+    agent: engineering          # default
+    override-agent:
+      low: generic              # /agent_level low  -> generic
+      high: senior-engineering  # /agent_level high -> senior-engineering
+```
+
+Validação (`config.py`): `override-agent` deve ser um mapa `<nível>: <agente>`,
+a coluna precisa ter um `agent` default, e todo agente referenciado deve existir
+em `agents`.
 
 ### Log de execução
 
 Cada execução gera um arquivo em `logs/<issue_id>/<timestamp>.md` com:
-- **Parâmetros**: plataforma, agente, model, effort, board, coluna, issue
+- **Parâmetros**: plataforma, agente, model, agent_level, board, coluna, issue
 - **Prompt**: prompt completo enviado ao agente
 - **Chat**: diálogo da execução (preenchido pelo adapter)
+
+### Continuidade de sessão
+
+A esteira mantém a continuidade do raciocínio do agente entre execuções da
+mesma issue. Quando um agente pausa (ex.: `/need_human` ou `/blocked_by`) e a
+tarefa retorna depois, ele retoma de onde parou em vez de recomeçar.
+
+- Índice em `.pipe/sessions.json` mapeia `<board>/<issue>/<agente>` →
+  `session_id` do kiro-cli (chave **por agente**: agentes distintos não herdam
+  a sessão um do outro; o mesmo agente reusado retoma o próprio raciocínio).
+- Antes de executar, se a sessão ainda existir, retoma via `--resume-id`.
+- Após executar, captura o id da sessão (mais recente do cwd) e atualiza o
+  índice.
+- A esteira **não** gerencia o ciclo de vida das sessões do kiro-cli — apenas
+  aponta enquanto existirem. Sessão inexistente vira sessão nova sem erro.
 
 ## Anotações no body (comandos `@---`)
 
@@ -184,7 +221,7 @@ presente garante a relação/atributo; ausente, remove. Não há comandos de
 | `/blocked_by #N, #M` | esta issue está bloqueada por N e M |
 | `/blocks #N, #M` | esta issue bloqueia N e M |
 | `/labels a, b, c` | define (SET) as labels da issue |
-| `/effort low\|medium\|high` | esforço sugerido |
+| `/agent_level low\|medium\|high` | nível de agente (chave de `override-agent`) |
 | `/need_human` | marca intervenção humana (label especial) |
 | `/close [completed\|not_planned]` | fecha a issue |
 | `/reopen` | reabre a issue |
@@ -204,7 +241,7 @@ Validar credenciais e retornar JWT.
 /parent #10
 /blocked_by #42, #58
 /labels backend, security
-/effort high
+/agent_level high
 ```
 
 ## Eventos de coluna (`on_in` / `on_out`)
@@ -243,7 +280,53 @@ eventos no bloco `@---` (sem tocar no snapshot); como o arquivo fica mais novo
 que o `body_mtime` salvo, o ciclo seguinte gera um `change-up` que sobe os
 status/labels resultantes — mantendo tudo sincronizado.
 
+## Otimização de Sincronização
+
+Para reduzir o número de requisições ao board por issue, o sync combina duas
+estratégias:
+
+- **Down (chamada única):** `get_issue` traz numa só query GraphQL título,
+  body, estado, labels, parent, filhos, coluna e arquivamento. As dependências
+  (`blocked_by`/`blocks`) só existem via REST e são buscadas apenas quando o
+  item da fila está marcado como `fullsync`.
+- **Up (comparar antes de escrever):** o estado desejado (comandos do arquivo)
+  é comparado com o estado conhecido no snapshot; só a diferença gera chamada.
+  Um `change-up` de "só body" cai de ~12 requisições para 1.
+
+### fullsync
+
+Cada item da fila tem um booleano `fullsync`. É `True` em todo create e no
+full sync diário (reconcilia propriedades + dependências); `False` em
+mudanças incrementais. Se um item full e um parcial coincidem no mesmo alvo,
+a fila promove o existente para full (sem duplicar).
+
+### Gatilho de par recíproco
+
+Relações são bidirecionais (`parent`↔`children`, `blocked_by`↔`blocks`). Ao
+detectar uma relação adicionada/removida numa issue, o sync enfileira um
+`change-down fullsync` do alvo **apenas se o snapshot do alvo ainda não
+refletir o par recíproco**. Essa checagem é a condição de parada e evita
+reação em cadeia infinita.
+
 ## Rate Limit (GitHub)
+
+Toda requisição respeita o throttle, inclusive dentro de loops de
+sincronização.
+
+### Detecção
+
+O rate limit é detectado **apenas por sinais de transporte**, nunca pelo corpo
+da resposta:
+
+- **Status HTTP** `403`/`429` (linha de status capturada via `gh api -i`).
+- **stderr** do `gh` mencionando rate limit.
+- **GraphQL**: resposta `200` com `errors[].type == RATE_LIMITED` (a seção
+  estruturada de erros, não o conteúdo das issues).
+
+O corpo da resposta **não** é escaneado em busca da expressão "rate limit". Se
+fosse, o título/body de uma issue contendo esse texto (ex.: uma issue sobre
+custo de API) provocaria falso-positivo em toda listagem, escalando throttle e
+penalty indevidamente.
 
 ### Throttle
 - Sleep antes de cada chamada (inicia em 16s)

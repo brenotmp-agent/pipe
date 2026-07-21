@@ -1,9 +1,10 @@
 from src.core.log import log
 from src.core.config import check_config as validate_config, ConfigError, SSH_KEY_ENV
-from src.core.board import Board, PenaltyException
+from src.core.board import Board, PenaltyException, BoardAccessError
 from src.core.snapshot import Snapshot
 from src.core.change_queue import ChangeQueue, QUEUE_FILE
 from src.core.sync import sync_remote, detect_local_changes, apply_changes
+from src.core.version import VERSION
 from src.adapters.github_board import GitHubBoardAdapter
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -77,11 +78,6 @@ def startup(config: dict):
         log.info("Startup", f"Removendo {repo_id}")
         shutil.rmtree(REPO_DIR / repo_id)
 
-    # Gerar os agentes nativos do kiro-cli (KIRO_HOME isolado)
-    from src.core.agent import generate_native_agents
-    home = generate_native_agents(config)
-    log.info("Startup", f"Agentes nativos gerados em {home / 'agents'}")
-
 
 def board_full_sync(config: dict):
     global board
@@ -154,35 +150,53 @@ def board_full_sync(config: dict):
     log.info("Board", f"{total} mudança(s) remota(s) adicionada(s) à fila")
 
 
-def sync_board(config: dict) -> bool:
-    """Sincroniza boards e retorna True se houve qualquer movimentação."""
+def get_board_ids(config: dict) -> list[str]:
+    """Retorna lista de board_ids ordenados por prioridade (menor = mais prioritário)."""
+    boards_cfg = config["boards"]
+    return sorted(
+        (bid for bid in boards_cfg if bid != "platform"),
+        key=lambda bid: boards_cfg[bid].get("priority", 999),
+    )
+
+
+def sync_board(board_id: str, config: dict) -> bool:
+    """Descobre mudanças (remotas e locais) de um único board.
+
+    Retorna True se houve qualquer mudança detectada para este board.
+    Penalty não propaga — apenas interrompe e retorna o que já descobriu.
+    """
     global board
     queue = ChangeQueue()
-    had_changes = False
 
-    for board_id in board.board_ids(config):
-        try:
-            sync_remote(board_id, board, queue)
-        except PenaltyException:
-            log.warning("Sync", f"[{board_id}] Penalty no sync remoto - pulando")
-            continue
+    try:
+        sync_remote(board_id, board, queue)
+    except PenaltyException:
+        log.warning("Sync", f"[{board_id}] Penalty no sync remoto")
 
-        detect_local_changes(board_id, queue)
+    detect_local_changes(board_id, queue)
 
-        # Se há itens na fila, houve movimentação
-        if queue.getNext() is not None:
-            had_changes = True
-
-        apply_changes(board_id, board, queue, config)
-
-    return had_changes
+    return queue.has_board(board_id)
 
 
-def keep_task(config: dict) -> dict | None:
-    """Seleciona a próxima tarefa elegível para execução.
+def process_queue(config: dict):
+    """Consome toda a fila de mudanças (qualquer board).
+
+    Penalty não propaga — interrompe e retorna para o próximo ciclo.
+    """
+    global board
+    queue = ChangeQueue()
+    if queue.size() == 0:
+        return
+    try:
+        apply_changes(board, queue, config)
+    except PenaltyException:
+        log.warning("Sync", "Penalty no process_queue")
+
+
+def keep_task(board_id: str, config: dict) -> dict | None:
+    """Seleciona a próxima tarefa elegível no board indicado.
 
     Lógica:
-    - Boards ordenados por prioridade (menor = mais prioritário)
     - Issues ordenadas por created_at (mais antiga primeiro)
     - Se issue está em 'todo', faz auto-advance local e retorna None (espera sync)
     - Elegível se: status=='ok', coluna tem 'agent', coluna tem 'change.advance'
@@ -190,56 +204,52 @@ def keep_task(config: dict) -> dict | None:
     - /need_human ou /blocked_by no body → bloqueada
     """
     boards_cfg = config["boards"]
-    boards_sorted = sorted(
-        ((bid, bcfg) for bid, bcfg in boards_cfg.items() if bid != "platform"),
-        key=lambda x: x[1].get("priority", 999),
-    )
+    board_cfg = boards_cfg[board_id]
 
-    for board_id, board_cfg in boards_sorted:
-        snap = Snapshot(board_id).load()
-        columns = board_cfg.get("columns", {})
-        todo_col = board_cfg.get("todo")
-        issues = [i for i in snap.issues if i.get("id") and i.get("status") == "ok"]
+    snap = Snapshot(board_id).load()
+    columns = board_cfg.get("columns", {})
+    todo_col = board_cfg.get("todo")
+    issues = [i for i in snap.issues if i.get("id") and i.get("status") == "ok"]
 
-        # parallel:false → bloquear auto-advance se issue ativa fora de todo/terminais
-        block_auto_advance = False
-        if board_cfg.get("parallel") is False:
-            terminal = {col_id for col_id, col in columns.items() if col.get("archive")}
-            inactive = (terminal | {todo_col}) if todo_col else terminal
-            block_auto_advance = any(i["column"] not in inactive for i in issues)
+    # parallel:false → bloquear auto-advance se issue ativa fora de todo/terminais
+    block_auto_advance = False
+    if board_cfg.get("parallel") is False:
+        terminal = {col_id for col_id, col in columns.items() if col.get("archive")}
+        inactive = (terminal | {todo_col}) if todo_col else terminal
+        block_auto_advance = any(i["column"] not in inactive for i in issues)
 
-        # Ordenar por created_at (campo pode não existir)
-        issues.sort(key=lambda i: i.get("created_at") or i.get("updated_at") or "")
+    # Ordenar por created_at (campo pode não existir)
+    issues.sort(key=lambda i: i.get("created_at") or i.get("updated_at") or "")
 
-        for issue in issues:
-            col_id = issue["column"]
+    for issue in issues:
+        col_id = issue["column"]
 
-            # Auto-advance do todo
-            if todo_col and col_id == todo_col:
-                if block_auto_advance:
-                    continue
-                advance_col = columns.get(todo_col, {}).get("change", {}).get("advance")
-                if advance_col:
-                    _auto_advance(board_id, issue, advance_col, snap)
-                    return None
+        # Auto-advance do todo
+        if todo_col and col_id == todo_col:
+            if block_auto_advance:
                 continue
+            advance_col = columns.get(todo_col, {}).get("change", {}).get("advance")
+            if advance_col:
+                _auto_advance(board_id, issue, advance_col, snap)
+                return None
+            continue
 
-            col = columns.get(col_id, {})
-            if not col.get("agent"):
-                continue
-            if not col.get("change", {}).get("advance"):
-                continue
-            if _is_blocked(issue):
-                continue
+        col = columns.get(col_id, {})
+        if not col.get("agent"):
+            continue
+        if not col.get("change", {}).get("advance"):
+            continue
+        if _is_blocked(issue):
+            continue
 
-            log.info("KeepTask", f"[{board_id}] #{issue['id']} selecionada em '{col_id}'")
-            return {
-                "board_id": board_id,
-                "issue": issue,
-                "column": col,
-                "col_id": col_id,
-                "board": board_cfg,
-            }
+        log.info("KeepTask", f"[{board_id}] #{issue['id']} selecionada em '{col_id}'")
+        return {
+            "board_id": board_id,
+            "issue": issue,
+            "column": col,
+            "col_id": col_id,
+            "board": board_cfg,
+        }
 
     return None
 
@@ -286,7 +296,7 @@ def call_agent(config: dict, task: dict | None):
     col = task["column"]
     issue = task["issue"]
 
-    from src.core.agent import (AgentParams, build_prompt, kiro_home,
+    from src.core.agent import (AgentParams, build_prompt,
                                 resolve_agent_id, resolve_repo_id,
                                 resolve_work_dir)
     from src.adapters.kiro_cli_agent import KiroCliAgent
@@ -326,7 +336,6 @@ def call_agent(config: dict, task: dict | None):
         col_id=col_id,
         prompt=prompt,
         work_dir=str(work_dir),
-        kiro_home=str(kiro_home()),
         repo_id=repo_id,
     )
 
@@ -334,16 +343,11 @@ def call_agent(config: dict, task: dict | None):
     adapter.execute(params)
 
 
-def sleep_time(config: dict, had_changes: bool, task: dict | None):
-    """Dorme pelo tempo configurado quando não há atividade.
-
-    Ativa sleep apenas se sync_board não movimentou nada E keep_task não
-    encontrou tarefa elegível.
-    """
-    if had_changes or task is not None:
-        return
+def sleep_time(config: dict):
+    """Dorme pelo tempo configurado quando não há atividade."""
     seconds = config["sleep"]
-    log.info("Sleep", f"Nenhuma atividade - dormindo {seconds}s")
+    back_at = (datetime.now() + timedelta(seconds=seconds)).strftime('%H:%M:%S')
+    log.info("Sleep", f"Nenhuma atividade - dormindo {seconds}s (retorna às {back_at})")
     time.sleep(seconds)
 
 
@@ -360,7 +364,7 @@ def main():
     global board
     print(_BANNER)
     log.separator()
-    log.info("Pipe", "Iniciando esteira agêntica")
+    log.info("Pipe", f"Iniciando esteira agêntica v{VERSION}")
 
     config = check_config()
     startup(config)
@@ -373,22 +377,68 @@ def main():
     adapter = ADAPTERS[platform]()
     board = Board(adapter)
     board.connect(config)
-    
+
+    # Gate de permissões: não inicia a esteira sem poder operar o repositório.
+    try:
+        board.check_access(config)
+    except BoardAccessError as e:
+        log.error("Startup", f"Permissões insuficientes - esteira não iniciada: {e}")
+        raise SystemExit(1)
+
     board_full_sync(config)
     last_full_sync = datetime.now().date()
+
+    # Array fixo de boards ordenados por prioridade
+    board_ids = get_board_ids(config)
+    index = 0
 
     log.info("Pipe", "Esteira agêntica iniciada")
     running = True
     while running:
-        today = datetime.now().date()
-        if today != last_full_sync:
-            board_full_sync(config)
-            last_full_sync = today
+        try:
+            today = datetime.now().date()
+            if today != last_full_sync:
+                board_full_sync(config)
+                last_full_sync = today
 
-        had_changes = sync_board(config)
-        task = keep_task(config)
-        call_agent(config, task)
-        sleep_time(config, had_changes, task)
+            current_board = board_ids[index]
+
+            # Fase 1: Descoberta no board atual
+            had_changes = sync_board(current_board, config)
+
+            # Fase 2: Processamento global da fila
+            process_queue(config)
+
+            # Se houve mudanças ou fila ainda tem itens, volta ao início
+            queue = ChangeQueue()
+            if had_changes or queue.size() > 0:
+                index = 0
+                continue
+
+            # Sem mudanças e fila vazia: buscar tarefa no board atual
+            task = keep_task(current_board, config)
+
+            if task:
+                call_agent(config, task)
+                index = 0
+            else:
+                # Nenhuma tarefa neste board, avança para o próximo
+                index += 1
+                if index >= len(board_ids):
+                    # Percorreu todos sem encontrar trabalho — sleep
+                    index = 0
+                    sleep_time(config)
+
+        except PenaltyException as e:
+            back_at = (datetime.now() + timedelta(seconds=e.wait_seconds)).strftime('%H:%M:%S')
+            log.warning("Pipe", f"Penalty - aguardando até {back_at}")
+            time.sleep(e.wait_seconds)
+        except KeyboardInterrupt:
+            log.info("Pipe", "Interrompido pelo usuário")
+            running = False
+        except Exception as e:
+            log.error("Pipe", f"Erro no ciclo (não fatal): {e}")
+            time.sleep(config.get("sleep", 60))
 
 
 if __name__ == "__main__":

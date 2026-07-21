@@ -1,6 +1,5 @@
 """Agent core - port para execução de agentes."""
 
-import json
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -11,18 +10,15 @@ from src.core.snapshot import BOARDS_DIR
 
 REPO_DIR = Path("repo")
 
-# KIRO_HOME isolado da esteira: agentes nativos gerados ficam aqui, fora do
-# ~/.kiro do usuário e fora do repo alvo (que é o cwd da execução).
-KIRO_HOME = Path(".pipe/kiro-home")
-
 CONTEXTS_DIR = Path("contexts")
 
 
-def issue_level(issue: dict) -> str | None:
-    """Lê o nível de dificuldade da issue (tag /effort no bloco @---).
+def agent_level(issue: dict) -> str | None:
+    """Lê o nível de agente da issue (tag /agent_level no bloco @---).
 
     O nível funciona como um "planning poker" simplificado (low|medium|high
-    por padrão, configurável pelo usuário). É persistido no body via /effort.
+    por padrão, configurável pelo usuário). É persistido no body via
+    /agent_level.
     """
     body_path = Path(issue.get("body_path", ""))
     if not body_path.exists():
@@ -30,17 +26,17 @@ def issue_level(issue: dict) -> str | None:
     content = body_path.read_text(encoding="utf-8")
     raw_body = content.split("\n", 1)[1] if "\n" in content else ""
     _, cmds = split_body(raw_body)
-    return cmds.effort
+    return cmds.agent_level
 
 
 def resolve_agent_id(col: dict, issue: dict) -> str:
     """Resolve o agente efetivo de uma coluna conforme o nível da issue.
 
-    Usa `override-agent[<nível>]` quando o nível (tag /effort) existe e está
-    mapeado; caso contrário, cai no `agent` default da coluna.
+    Usa `override-agent[<nível>]` quando o nível (tag /agent_level) existe e
+    está mapeado; caso contrário, cai no `agent` default da coluna.
     """
     overrides = col.get("override-agent") or {}
-    level = issue_level(issue)
+    level = agent_level(issue)
     if level and level in overrides:
         return overrides[level]
     return col.get("agent", "")
@@ -60,58 +56,11 @@ def resolve_work_dir(config: dict, board_cfg: dict) -> Path:
     return (REPO_DIR / resolve_repo_id(config, board_cfg)).resolve()
 
 
-def kiro_home() -> Path:
-    """Diretório KIRO_HOME isolado da esteira (absoluto)."""
-    return KIRO_HOME.resolve()
-
-
-def generate_native_agents(config: dict) -> Path:
-    """Gera os configs de agente nativos do kiro-cli a partir do pipe.yml.
-
-    Para cada agente em `agents.<plataforma>.<id>`, escreve
-    `<KIRO_HOME>/agents/<id>.json` com:
-      - name: id do agente
-      - description: nome amigável (campo `name` do pipe.yml)
-      - prompt: file:// para contexts/<plataforma>/<id>.md (system prompt)
-      - model: agent_cfg.model (se definido)
-      - tools: ["*"] (o sandbox é garantido pelo cwd no repo)
-
-    Os configs são globais nesse KIRO_HOME, evitando poluir o repo alvo (que é
-    o cwd da execução) e o ~/.kiro do usuário. Retorna o caminho do KIRO_HOME.
-    """
-    home = kiro_home()
-    agents_dir = home / "agents"
-    agents_dir.mkdir(parents=True, exist_ok=True)
-
-    # Limpa configs antigos para refletir exatamente o pipe.yml atual.
-    for old in agents_dir.glob("*.json"):
-        old.unlink()
-
-    for platform_id, platform_agents in config.get("agents", {}).items():
-        for agent_id, agent_cfg in platform_agents.items():
-            ctx_file = (CONTEXTS_DIR / platform_id / f"{agent_id}.md").resolve()
-            spec = {
-                "name": agent_id,
-                "description": agent_cfg.get("name", agent_id),
-                "prompt": f"file://{ctx_file}",
-                "tools": ["*"],
-            }
-            model = agent_cfg.get("model")
-            if model:
-                spec["model"] = model
-
-            (agents_dir / f"{agent_id}.json").write_text(
-                json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-
-    return home
-
-
 @dataclass
 class AgentParams:
     """Parâmetros para execução do agente."""
     platform: str
-    agent_id: str          # id do agente nativo (usado em --agent)
+    agent_id: str          # id do agente resolvido (config)
     agent_name: str        # nome amigável (log)
     model: str
     issue_id: str
@@ -119,7 +68,6 @@ class AgentParams:
     col_id: str
     prompt: str
     work_dir: str          # diretório de trabalho do agente (clone em repo/<repo_id>)
-    kiro_home: str         # KIRO_HOME isolado com os agentes nativos gerados
     repo_id: str = None    # id do repositório alvo (chave em git.repo)
     context: str = None
 
@@ -147,8 +95,15 @@ def build_prompt(config: dict, task: dict) -> str:
     col = task["column"]
     col_id = task["col_id"]
     issue = task["issue"]
-    agent_name = resolve_agent_id(col, issue)
+    agent_id = resolve_agent_id(col, issue)
     gitevents = col.get("gitevents")  # create|use|merge|create-merge|no-branch
+
+    # Resolver nome humanizado do agente a partir da config
+    agent_display_name = agent_id
+    for platform_agents in config.get("agents", {}).values():
+        if agent_id in platform_agents:
+            agent_display_name = platform_agents[agent_id].get("name", agent_id)
+            break
 
     # Resolver diretório de trabalho (sandbox do agente).
     # O agente SEMPRE opera dentro de repo/<repo_id>; nunca no diretório da esteira.
@@ -184,6 +139,8 @@ def build_prompt(config: dict, task: dict) -> str:
     lines = []
 
     # ── Cabeçalho ──
+    lines.append(f"Você é: {agent_display_name}.")
+    lines.append("")
     lines.append(f"**Tarefa:** {title}")
     lines.append(f"**Etapa:** {col.get('name', col_id)}")
     lines.append(f"**Objetivo:** {col.get('target-prompt', '')}")
@@ -230,7 +187,7 @@ def build_prompt(config: dict, task: dict) -> str:
     lines.append("")
     lines.append("Realize o objetivo descrito acima. Ao concluir ou se houver bloqueio:")
     lines.append("")
-    lines.append(f"- Anote observações, dúvidas ou resumo em `{addcomment_file}` (assine com `— {agent_name}` no final)")
+    lines.append(f"- Anote observações, dúvidas ou resumo em `{addcomment_file}` (assine com `— {agent_display_name}` no final)")
     lines.append("")
 
     # ── Commit & Push (create / use / merge / create-merge) ──

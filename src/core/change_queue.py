@@ -54,10 +54,18 @@ class ChangeQueue:
         """Adiciona um item à fila, atribuindo um uuid.
 
         Ignora se já houver item equivalente. Retorna True se adicionou.
+
+        Upgrade de fullsync: se já existe um item equivalente que NÃO é
+        fullsync e o novo é fullsync, promove o existente para fullsync=True
+        (o full é superset do parcial) e retorna False (não duplica).
         """
         items = self._read()
-        if any(existing.same_target(item) for existing in items):
-            return False
+        for existing in items:
+            if existing.same_target(item):
+                if item.fullsync and not existing.fullsync:
+                    existing.fullsync = True
+                    self._write(items)
+                return False
         item.uuid = str(uuidlib.uuid4())
         items.append(item)
         self._write(items)
@@ -67,18 +75,35 @@ class ChangeQueue:
         """Adiciona vários itens (deduplicando entre si e com a fila).
 
         Cada item adicionado recebe um uuid. Retorna a quantidade adicionada.
+        Aplica upgrade de fullsync sobre itens equivalentes já presentes.
         """
         items = self._read()
         added = 0
+        dirty = False
         for item in new_items:
-            if any(existing.same_target(item) for existing in items):
+            existing = next(
+                (e for e in items if e.same_target(item)), None
+            )
+            if existing is not None:
+                if item.fullsync and not existing.fullsync:
+                    existing.fullsync = True
+                    dirty = True
                 continue
             item.uuid = str(uuidlib.uuid4())
             items.append(item)
             added += 1
-        if added:
+            dirty = True
+        if dirty:
             self._write(items)
         return added
+
+    def size(self) -> int:
+        """Retorna a quantidade de itens na fila."""
+        return len(self._read())
+
+    def has_board(self, board_id: str) -> bool:
+        """Retorna True se há pelo menos um item para o board informado."""
+        return any(item.board == board_id for item in self._read())
 
     def getNext(self) -> ChangeItem | None:
         """Espia o item mais antigo da fila sem removê-lo (FIFO).

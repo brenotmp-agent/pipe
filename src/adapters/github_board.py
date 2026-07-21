@@ -10,6 +10,11 @@ from src.core.board import BoardPort, Issue, PenaltyException
 from src.core.log import log
 
 
+# Sentinela para diferenciar "não informado" (buscar do board) de None
+# (valor conhecido = sem parent). Usado nos setters que aceitam estado conhecido.
+_UNSET = object()
+
+
 class GitHubBoardAdapter(BoardPort):
     """Adapter para GitHub Projects V2."""
 
@@ -22,6 +27,7 @@ class GitHubBoardAdapter(BoardPort):
     # Throttle
     _throttle_value: int = 16
     _throttle_cooldown: datetime = None
+    _throttle_file: str = ".pipe/throttle"
 
     # Offline (sem conexão) - backoff de reconexão
     _offline_value: int = 1
@@ -76,6 +82,8 @@ class GitHubBoardAdapter(BoardPort):
         if self._throttle_cooldown < datetime.now():
             if self._throttle_value > 1:
                 self._throttle_value //= 2
+                self._save_throttle()
+                log.info("GitHub", f"Throttle reduzido para {self._throttle_value}s (cooldown)")
             self._throttle_cooldown = datetime.now() + timedelta(hours=1)
 
         time.sleep(self._throttle_value)
@@ -86,7 +94,28 @@ class GitHubBoardAdapter(BoardPort):
 
         self._throttle_value = min(self._throttle_value * 2, 64)
         self._throttle_cooldown = datetime.now() + timedelta(hours=1)
+        self._save_throttle()
         log.info("GitHub", f"Throttle aumentado para {self._throttle_value}s")
+
+    def _save_throttle(self):
+        """Persiste throttle_value em arquivo para sobreviver a reinícios."""
+        from pathlib import Path
+        f = Path(self._throttle_file)
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(str(self._throttle_value), encoding="utf-8")
+
+    def _load_throttle(self):
+        """Carrega throttle_value persistido (se existir)."""
+        from pathlib import Path
+        f = Path(self._throttle_file)
+        if f.exists():
+            try:
+                val = int(f.read_text(encoding="utf-8").strip())
+                if val > self._throttle_value:
+                    self._throttle_value = val
+                    log.info("GitHub", f"Throttle restaurado: {val}s")
+            except (ValueError, OSError):
+                pass
 
     def _extract_retry_after(self, text: str) -> int | None:
         """Extrai retry-after de headers ou mensagem de erro."""
@@ -95,58 +124,195 @@ class GitHubBoardAdapter(BoardPort):
             return int(m.group(1))
         return None
 
-    def _get_rate_limit_reset(self) -> int | None:
-        """Consulta tempo até reset do primary rate limit."""
+    def _graphql_rate_limited(self, output: str) -> bool:
+        """Detecta rate limit REAL numa resposta GraphQL (HTTP 200 + errors).
+
+        O GitHub sinaliza rate limit no GraphQL com HTTP 200 e um array
+        ``errors`` contendo ``type == "RATE_LIMITED"``. Inspecionamos APENAS
+        essa seção estruturada — nunca o conteúdo de issues (title/body), que
+        pode conter a expressão "rate limit" e causar falso-positivo.
+        """
+        if not output:
+            return False
         try:
+            data = json.loads(output)
+        except (ValueError, TypeError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        errors = data.get("errors")
+        if not isinstance(errors, list):
+            return False
+        for err in errors:
+            if not isinstance(err, dict):
+                continue
+            etype = str(err.get("type", "")).upper()
+            if etype in ("RATE_LIMITED", "FORBIDDEN"):
+                return True
+            # Mensagem do próprio erro da API (não do conteúdo da issue).
+            msg = str(err.get("message", "")).lower()
+            if "rate limit" in msg or "was submitted too quickly" in msg:
+                return True
+        return False
+
+    def _get_rate_limit_info(self) -> dict:
+        """Consulta status do rate limit via GET /rate_limit.
+
+        Retorna dict com limit, remaining, reset (epoch), used, resource.
+        Prioriza o recurso que está esgotado (remaining == 0).
+        Não conta contra o primary rate limit.
+
+        NOTA: chamada de dentro de _handle_rate_limit (que roda dentro de
+        _gh/_gql). NÃO pode ser roteada por _gh (recursão infinita). Respeita
+        o throttle chamando self._throttle() diretamente.
+        """
+        try:
+            self._throttle()
             result = subprocess.run(
                 ["gh", "api", "rate_limit"],
                 capture_output=True, text=True
             )
             if result.returncode != 0:
-                return None
-            data = json.loads(result.stdout)
-            resources = data.get("resources", {})
-            for key in ("graphql", "core"):
+                return {}
+            body = json.loads(result.stdout)
+            resources = body.get("resources", {})
+
+            # Encontrar o recurso esgotado (remaining == 0)
+            exhausted = None
+            for key in ("core", "graphql", "search", "code_search"):
                 r = resources.get(key, {})
                 if r.get("remaining", 1) == 0:
-                    return r.get("reset", 0) - int(time.time()) + 5
-            return None
-        except Exception:
-            return None
+                    exhausted = dict(r)
+                    exhausted["resource"] = key
+                    break
 
-    def _handle_rate_limit(self, output: str, error: str) -> bool:
+            if exhausted:
+                return {
+                    "limit": exhausted.get("limit", 0),
+                    "remaining": 0,
+                    "used": exhausted.get("used", 0),
+                    "reset": exhausted.get("reset", 0),
+                    "resource": exhausted["resource"],
+                }
+            return {}
+        except Exception:
+            return {}
+
+    def _handle_rate_limit(self, output: str, error: str, headers: dict = None) -> bool:
         """Detecta e trata rate limit a partir da saída do gh.
 
-        Retorna True se era rate limit (já aguardou; caller deve repetir a chamada),
-        False caso contrário.
+        IMPORTANTE: a detecção usa SOMENTE sinais de transporte — status HTTP
+        (403/429), stderr do gh e a seção estruturada ``errors`` de uma resposta
+        GraphQL. O corpo da resposta (``output``) NUNCA é escaneado em busca da
+        expressão "rate limit", pois o título/body de uma issue pode conter esse
+        texto e provocar falso-positivo em toda listagem (o que dispararia
+        throttle/penalty indevidos).
+
+        Retorna True se era rate limit (já aguardou; caller deve repetir a
+        chamada), False caso contrário.
         """
-        combined = f"{output} {error}".lower()
-        if "rate limit" not in combined and "secondary rate limit" not in combined:
+        headers = headers or {}
+        status = headers.get("__status__")
+        err_lc = (error or "").lower()
+
+        # Sinais de rate limit (apenas transporte / erro estruturado):
+        #  - HTTP 403 ou 429 na linha de status da resposta
+        #  - stderr do gh menciona rate limit (mensagem da própria CLI/API)
+        #  - resposta GraphQL com errors[].type == RATE_LIMITED/FORBIDDEN
+        status_signal = status in (403, 429)
+        stderr_signal = "rate limit" in err_lc
+        graphql_signal = self._graphql_rate_limited(output)
+
+        if not (status_signal or stderr_signal or graphql_signal):
             return False
 
-        # Secondary rate limit (tem retry-after)
-        if self._extract_retry_after(f"{output} {error}"):
-            wait = self._throttle_value * 8
+        # retry-after: só de stderr e headers (nunca do corpo da resposta).
+        retry_after = self._extract_retry_after(error or "")
+        if not retry_after and headers.get("retry-after"):
+            try:
+                retry_after = int(headers["retry-after"])
+            except ValueError:
+                pass
+
+        # Classificação secondary vs primary — só depois de confirmado o limite:
+        #  - remaining > 0 (ainda há cota) => secondary/abuse
+        #  - retry-after presente => secondary
+        #  - menção explícita a "secondary rate limit" no stderr => secondary
+        h_remaining = headers.get("x-ratelimit-remaining")
+        remaining_int = None
+        if h_remaining is not None:
+            try:
+                remaining_int = int(h_remaining)
+            except ValueError:
+                remaining_int = None
+
+        is_secondary = (
+            "secondary rate limit" in err_lc
+            or retry_after is not None
+            or (remaining_int is not None and remaining_int > 0)
+        )
+
+        if is_secondary:
+            # Usar o maior entre retry-after e throttle*4 (backoff exponencial)
+            min_wait = self._throttle_value * 4
+            wait = max(retry_after or 0, min_wait, 60)
             back_at = (datetime.now() + timedelta(seconds=wait)).strftime("%H:%M:%S")
-            log.warning("GitHub", f"[{self._throttle_value}s] Secondary rate limit - retorna às {back_at}",
-                        wait_seconds=wait, stdout=output[:300], stderr=error[:300])
+            log.warning("GitHub",
+                        f"Secondary rate limit (pontos restantes: {h_remaining or '?'}, "
+                        f"throttle: {self._throttle_value}s) "
+                        f"- aguardando {wait}s (retorna às {back_at})",
+                        wait_seconds=wait, retry_after=retry_after,
+                        remaining=h_remaining, throttle=self._throttle_value,
+                        status=status)
             self._throttle_hit()
             time.sleep(wait)
             return True
 
-        # Primary rate limit - buscar tempo de reset
-        reset_time = self._get_rate_limit_reset()
-        if reset_time and reset_time > 0:
-            back_at = (datetime.now() + timedelta(seconds=reset_time)).strftime("%H:%M:%S")
-            log.warning("GitHub", f"[{self._throttle_value}s] Primary rate limit - retorna às {back_at}",
-                        wait_seconds=reset_time, stdout=output[:300], stderr=error[:300])
-            time.sleep(reset_time)
+        # Primary rate limit - usar headers da resposta (remaining == 0)
+        h_reset = headers.get("x-ratelimit-reset")
+        h_limit = headers.get("x-ratelimit-limit")
+        h_used = headers.get("x-ratelimit-used")
+        h_resource = headers.get("x-ratelimit-resource", "core")
+
+        if h_reset:
+            reset_epoch = int(h_reset)
+            wait = max(1, reset_epoch - int(time.time()) + 5)
+            back_at = datetime.fromtimestamp(reset_epoch).strftime("%H:%M:%S")
+            log.warning("GitHub",
+                        f"Primary rate limit ({h_resource}) - "
+                        f"{h_used or '?'}/{h_limit or '?'} usado, "
+                        f"0 restante, "
+                        f"reset às {back_at} (aguardando {wait}s)",
+                        resource=h_resource, limit=h_limit,
+                        remaining=0, used=h_used,
+                        reset=reset_epoch, wait_seconds=wait)
+            time.sleep(wait)
             return True
 
-        # Fallback
-        back_at = (datetime.now() + timedelta(seconds=60)).strftime("%H:%M:%S")
-        log.warning("GitHub", f"[{self._throttle_value}s] Rate limit sem tempo definido - retorna às {back_at}",
-                    wait_seconds=60, stdout=output[:300], stderr=error[:300])
+        # Fallback: consultar /rate_limit endpoint
+        info = self._get_rate_limit_info()
+        if info:
+            reset_epoch = info.get("reset", 0)
+            wait = max(1, reset_epoch - int(time.time()) + 5)
+            back_at = datetime.fromtimestamp(reset_epoch).strftime("%H:%M:%S")
+            log.warning("GitHub",
+                        f"Primary rate limit ({info['resource']}) - "
+                        f"{info['used']}/{info['limit']} usado, "
+                        f"0 restante, "
+                        f"reset às {back_at} (aguardando {wait}s)",
+                        resource=info["resource"], limit=info["limit"],
+                        remaining=0, used=info["used"],
+                        reset=reset_epoch, wait_seconds=wait)
+            time.sleep(wait)
+            return True
+
+        # Fallback final
+        wait = 60
+        back_at = (datetime.now() + timedelta(seconds=wait)).strftime("%H:%M:%S")
+        log.warning("GitHub",
+                    f"Rate limit (sem detalhes) - aguardando {wait}s "
+                    f"(retorna às {back_at})",
+                    wait_seconds=wait, stdout=output[:300], stderr=error[:300])
         time.sleep(60)
         return True
 
@@ -180,8 +346,20 @@ class GitHubBoardAdapter(BoardPort):
         self._offline_value = min(self._offline_value * 2, self._offline_max)
         return True
 
-    def _gh(self, *args) -> str:
-        """Executa comando gh com tratamento de rate limit e falta de conexão."""
+    def _gh(self, *args, stdin: str = None) -> str:
+        """Executa comando gh com tratamento de rate limit e falta de conexão.
+
+        Se stdin for fornecido, envia os dados via stdin do processo (útil para --input -).
+        Para chamadas 'gh api', injeta -i para capturar headers de rate limit.
+        """
+        # Detectar se é uma chamada gh api (para injetar -i e parsear headers)
+        is_api = len(args) > 0 and args[0] == "api"
+        # Não injetar -i se já tem -i ou --include
+        has_include = "-i" in args or "--include" in args
+        if is_api and not has_include:
+            # Inserir -i após 'api'
+            args = (args[0], "-i", *args[1:])
+
         attempt = 0
         while True:
             attempt += 1
@@ -189,11 +367,20 @@ class GitHubBoardAdapter(BoardPort):
                 log.info("GitHub", f"[{self._throttle_value}s] Tentando novamente (tentativa {attempt})",
                          attempt=attempt, command=args[0] if args else "")
             self._throttle()
-            result = subprocess.run(["gh", *args], capture_output=True, text=True)
-            output = result.stdout.strip()
+            result = subprocess.run(["gh", *args], capture_output=True, text=True,
+                                    input=stdin)
+            raw_output = result.stdout.strip()
             error = result.stderr.strip()
 
-            if self._handle_rate_limit(output, error):
+            # Separar headers do body quando -i foi injetado
+            output = raw_output
+            if is_api and not has_include:
+                output, headers = self._split_response(raw_output)
+                self._log_rate_limit_headers(headers)
+            else:
+                headers = {}
+
+            if self._handle_rate_limit(output, error, headers):
                 continue
 
             if result.returncode != 0 and self._handle_offline(output, error):
@@ -205,6 +392,76 @@ class GitHubBoardAdapter(BoardPort):
             self._offline_value = 1
             return output
 
+    def _split_response(self, raw: str) -> tuple[str, dict]:
+        """Separa headers HTTP do body na resposta com -i.
+
+        Retorna (body, headers_dict).
+        """
+        # gh api -i retorna: HTTP/1.1 200 OK\r\n<headers>\r\n\r\n<body>
+        # ou com \n\n como separador
+        separators = ["\r\n\r\n", "\n\n"]
+        for sep in separators:
+            if sep in raw:
+                header_block, body = raw.split(sep, 1)
+                headers = self._parse_headers(header_block)
+                return body.strip(), headers
+        return raw, {}
+
+    def _parse_headers(self, header_block: str) -> dict:
+        """Parse dos headers HTTP em um dict (chaves lowercase).
+
+        A linha de status ("HTTP/2 403 Forbidden") é guardada sob a chave
+        sintética "__status__" (int) para permitir detecção de rate limit sem
+        inspecionar o corpo da resposta.
+        """
+        headers = {}
+        for line in header_block.splitlines():
+            stripped = line.strip()
+            # Linha de status HTTP: "HTTP/1.1 403 Forbidden" / "HTTP/2 200"
+            if stripped.upper().startswith("HTTP/"):
+                parts = stripped.split()
+                if len(parts) >= 2 and parts[1].isdigit():
+                    headers["__status__"] = int(parts[1])
+                continue
+            if ":" in line:
+                key, value = line.split(":", 1)
+                headers[key.strip().lower()] = value.strip()
+        return headers
+
+    def _log_rate_limit_headers(self, headers: dict) -> None:
+        """Loga informações de rate limit extraídas dos headers da resposta."""
+        remaining = headers.get("x-ratelimit-remaining")
+        limit = headers.get("x-ratelimit-limit")
+        reset = headers.get("x-ratelimit-reset")
+        used = headers.get("x-ratelimit-used")
+        resource = headers.get("x-ratelimit-resource", "core")
+
+        if remaining is None:
+            return
+
+        remaining_int = int(remaining)
+        limit_int = int(limit) if limit else 0
+        reset_str = ""
+        if reset:
+            try:
+                reset_str = datetime.fromtimestamp(int(reset)).strftime("%H:%M:%S")
+            except (ValueError, OSError):
+                reset_str = reset
+
+        # Logar sempre como debug (nível INFO só quando está baixo)
+        if remaining_int <= 100:
+            log.warning("GitHub",
+                        f"Rate limit baixo: {remaining}/{limit} restante "
+                        f"({resource}), reset às {reset_str}",
+                        remaining=remaining_int, limit=limit_int,
+                        used=used, resource=resource, reset=reset_str)
+        elif remaining_int <= 500:
+            log.info("GitHub",
+                     f"Rate limit: {remaining}/{limit} restante "
+                     f"({resource}), reset às {reset_str}",
+                     remaining=remaining_int, limit=limit_int,
+                     used=used, resource=resource, reset=reset_str)
+
     def _gql(self, query: str, **variables) -> dict:
         """Executa query GraphQL com tratamento de rate limit e falta de conexão."""
         attempt = 0
@@ -214,16 +471,19 @@ class GitHubBoardAdapter(BoardPort):
                 log.info("GitHub", f"[{self._throttle_value}s] Tentando novamente (tentativa {attempt})",
                          attempt=attempt, query=query[:80])
             self._throttle()
-            args = ["gh", "api", "graphql", "-f", f"query={query}"]
+            args = ["gh", "api", "-i", "graphql", "-f", f"query={query}"]
             for k, v in variables.items():
-                flag = "-F" if isinstance(v, (int, float, bool)) else "-f"
-                args += [flag, f"{k}={v}"]
+                args += self._field_arg(k, v)
 
             result = subprocess.run(args, capture_output=True, text=True)
-            output = result.stdout.strip()
+            raw_output = result.stdout.strip()
             error = result.stderr.strip()
 
-            if self._handle_rate_limit(output, error):
+            # Separar headers do body
+            output, headers = self._split_response(raw_output)
+            self._log_rate_limit_headers(headers)
+
+            if self._handle_rate_limit(output, error, headers):
                 continue
 
             if result.returncode != 0 and self._handle_offline(output, error):
@@ -309,7 +569,76 @@ class GitHubBoardAdapter(BoardPort):
         self._repo = list(repos.values())[0] if repos else None
         if self._repo and self._repo.startswith("git@github.com:"):
             self._repo = self._repo.replace("git@github.com:", "").replace(".git", "")
-        log.info("GitHub", f"Repositório: {self._repo}")
+        self._load_throttle()
+        log.info("GitHub", f"Repositório: {self._repo} (throttle: {self._throttle_value}s)")
+
+    def check_access(self, config: dict) -> None:
+        """Valida acesso e permissão de escrita no repositório ANTES de rodar.
+
+        Usa chamadas diretas ao ``gh`` (sem passar por ``_gh``) para não acionar
+        o tratamento de rate limit/penalty durante a verificação de startup —
+        um 403 aqui significa "sem permissão", não "rate limit".
+
+        Levanta ``BoardAccessError`` quando:
+          - não há repositório configurado;
+          - o token não está autenticado;
+          - o repositório não existe ou é inacessível pelo token;
+          - o token não tem permissão de escrita (push/maintain/admin).
+        """
+        from src.core.board import BoardAccessError
+
+        if not self._repo:
+            raise BoardAccessError("Repositório não configurado em git.repo")
+
+        # 1. Usuário autenticado
+        who = subprocess.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True, text=True,
+        )
+        if who.returncode != 0:
+            raise BoardAccessError(
+                "Token do gh não autenticado ou inválido: "
+                + (who.stderr.strip() or "falha ao consultar /user")
+            )
+        login = who.stdout.strip()
+
+        # 2. Acesso e permissões no repositório
+        result = subprocess.run(
+            ["gh", "api", f"repos/{self._repo}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            err = result.stderr.strip() or result.stdout.strip()
+            raise BoardAccessError(
+                f"Sem acesso ao repositório '{self._repo}' como '{login}': {err}"
+            )
+
+        try:
+            data = json.loads(result.stdout)
+        except (ValueError, TypeError):
+            raise BoardAccessError(
+                f"Resposta inválida ao consultar repositório '{self._repo}'"
+            )
+
+        perms = data.get("permissions") or {}
+        can_write = bool(
+            perms.get("admin") or perms.get("maintain") or perms.get("push")
+        )
+        if not can_write:
+            level = next(
+                (name for name, key in (
+                    ("admin", "admin"), ("maintain", "maintain"),
+                    ("push", "push"), ("triage", "triage"), ("pull", "pull"),
+                ) if perms.get(key)),
+                "nenhuma",
+            )
+            raise BoardAccessError(
+                f"Token '{login}' não tem permissão de escrita em "
+                f"'{self._repo}' (nível atual: {level}). "
+                f"É necessário push, maintain ou admin."
+            )
+
+        log.info("GitHub", f"Permissões OK: '{login}' com escrita em '{self._repo}'")
 
     def sync_boards(self, boards: list[dict]) -> None:
         self._penalty_check()
@@ -437,12 +766,25 @@ class GitHubBoardAdapter(BoardPort):
         all_issues = self.list_issues(board_id)
         return [i for i in all_issues if i.updated_at and i.updated_at > since]
 
-    def get_issue(self, board_id: str, issue_id: str) -> Issue:
+    def get_issue(self, board_id: str, issue_id: str, fullsync: bool = False) -> Issue:
         self._penalty_check()
-        log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - Buscando issue",
-                 operation="get_issue", board_id=board_id, issue_id=issue_id)
+        log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - Buscando issue"
+                 + (" (fullsync)" if fullsync else ""),
+                 operation="get_issue", board_id=board_id, issue_id=issue_id,
+                 fullsync=fullsync)
+        # Chamada única: propriedades + labels + parent + children + status
+        # (coluna) + isArchived do item do project. Dependencies (blocked_by/
+        # blocks) NÃO existem no GraphQL (só REST) e só são buscadas quando
+        # fullsync=True, via _get_dependencies (2 chamadas REST).
         data = self._gql(
-            "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){number title body state updatedAt labels(first:20){nodes{name}} parent{number} subIssues(first:50){nodes{number}}}}}",
+            "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){"
+            "number title body state updatedAt "
+            "labels(first:50){nodes{name}} "
+            "parent{number} "
+            "subIssues(first:50){nodes{number}} "
+            "projectItems(first:10){nodes{isArchived project{id} "
+            "fieldValues(first:10){nodes{...on ProjectV2ItemFieldSingleSelectValue{field{...on ProjectV2SingleSelectField{name}} name}}}}}"
+            "}}}",
             owner=self._repo.split("/")[0],
             repo=self._repo.split("/")[1],
             number=int(issue_id),
@@ -456,12 +798,32 @@ class GitHubBoardAdapter(BoardPort):
             for n in (issue.get("subIssues", {}) or {}).get("nodes", [])
             if n.get("number")
         ]
-        blocked_by, blocks = self._get_dependencies(issue_id)
+
+        # Coluna (Status) e arquivamento a partir do item do project deste board.
+        column = ""
+        archived = False
+        target_pid = (self._projects or {}).get(board_id, {}).get("project_id")
+        for pi in (issue.get("projectItems", {}) or {}).get("nodes", []):
+            pid = (pi.get("project") or {}).get("id")
+            if target_pid and pid != target_pid:
+                continue
+            archived = bool(pi.get("isArchived"))
+            for fv in (pi.get("fieldValues", {}) or {}).get("nodes", []):
+                if (fv.get("field") or {}).get("name") == "Status":
+                    column = fv.get("name", "")
+                    break
+            break
+
+        # Dependencies só no fullsync (2 chamadas REST extras).
+        blocked_by, blocks = ([], [])
+        if fullsync:
+            blocked_by, blocks = self._get_dependencies(issue_id)
+
         return Issue(
             id=str(issue["number"]),
             title=issue.get("title", ""),
             body=issue.get("body", ""),
-            column="",
+            column=column,
             labels=labels,
             updated_at=issue.get("updatedAt", ""),
             parent=parent,
@@ -469,23 +831,40 @@ class GitHubBoardAdapter(BoardPort):
             blocked_by=blocked_by,
             blocks=blocks,
             state=(issue.get("state") or "").lower(),
+            archived=archived,
         )
 
     def create_issue(self, board_id: str, title: str, body: str, column: str) -> Issue:
         self._penalty_check()
         log.info("GitHub", f"[{self._throttle_value}s] {board_id} - Criando issue '{title}'",
                  operation="create_issue", board_id=board_id, title=title)
+        # 'gh issue create' NÃO suporta --json; ele imprime a URL da issue
+        # criada no stdout (ex.: https://github.com/owner/repo/issues/42).
         result = self._gh("issue", "create", "--repo", self._repo,
-                          "--title", title, "--body", body, "--json", "number,title,body,updatedAt")
-        data = json.loads(result)
-        issue_id = str(data["number"])
+                          "--title", title, "--body", body)
+        issue_url = result.strip().splitlines()[-1].strip() if result.strip() else ""
+        issue_id = issue_url.rstrip("/").split("/")[-1]
+        if not issue_id.isdigit():
+            raise Exception(
+                f"Não foi possível extrair o número da issue da saída de 'gh issue create': {result!r}"
+            )
+        # Buscar node_id e updatedAt em uma única query GraphQL.
+        info = self._gql(
+            "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){id updatedAt}}}",
+            owner=self._repo.split("/")[0],
+            repo=self._repo.split("/")[1],
+            number=int(issue_id),
+        )
+        issue_node = (info.get("repository") or {}).get("issue") or {}
+        node_id = issue_node.get("id")
+        updated_at = issue_node.get("updatedAt", "")
         # Adicionar ao project e mover para coluna
         meta = self._board_meta(board_id)
         # Adicionar issue ao project
         add_data = self._gql(
             "mutation($pid:ID!,$contentId:ID!){addProjectV2ItemById(input:{projectId:$pid,contentId:$contentId}){item{id}}}",
             pid=meta["project_id"],
-            contentId=self._get_issue_node_id(issue_id),
+            contentId=node_id,
         )
         item_id = add_data["addProjectV2ItemById"]["item"]["id"]
         # Mover para coluna correta
@@ -498,7 +877,7 @@ class GitHubBoardAdapter(BoardPort):
             )
         return Issue(
             id=issue_id, title=title, body=body, column=column,
-            updated_at=data.get("updatedAt", ""),
+            updated_at=updated_at,
         )
 
     def _get_issue_node_id(self, issue_id: str) -> str:
@@ -598,13 +977,28 @@ class GitHubBoardAdapter(BoardPort):
         db_id = issue.get("fullDatabaseId")
         return int(db_id) if db_id else None
 
+    @staticmethod
+    def _field_arg(key, value) -> list[str]:
+        """Serializa um campo para o ``gh api``.
+
+        Usa ``-F`` (typed) para bool/int/float e ``-f`` (string) para o resto.
+        Booleanos são emitidos como os literais JSON ``true``/``false``: o gh só
+        reconhece a conversão mágica com literais minúsculos, então ``str(True)``
+        == ``"True"`` seria enviado como string e rejeitado pela API
+        (ex.: ``Invalid property /replace_parent: "True" is not of type boolean``).
+        """
+        if isinstance(value, bool):
+            return ["-F", f"{key}={'true' if value else 'false'}"]
+        if isinstance(value, (int, float)):
+            return ["-F", f"{key}={value}"]
+        return ["-f", f"{key}={value}"]
+
     def _api(self, method: str, path: str, **fields) -> str:
         """Chama a REST API via gh api (método + path + campos -f/-F)."""
         args = ["api", "-X", method,
                 "-H", "Accept: application/vnd.github+json", path]
         for k, v in fields.items():
-            flag = "-F" if isinstance(v, (int, float, bool)) else "-f"
-            args += [flag, f"{k}={v}"]
+            args += self._field_arg(k, v)
         return self._gh(*args)
 
     # ── Sub-issues (parent / children) ────────────────────────────────────────
@@ -640,11 +1034,18 @@ class GitHubBoardAdapter(BoardPort):
         self._api("DELETE", f"/repos/{owner}/{repo}/issues/{parent_number}/sub_issue",
                   sub_issue_id=child_db)
 
-    def set_children(self, board_id: str, issue_id: str, children_ids: list[str]) -> None:
-        """SET das sub-issues: adiciona faltantes e remove as não declaradas."""
+    def set_children(self, board_id: str, issue_id: str, children_ids: list[str],
+                     known_current: list[str] | None = None) -> None:
+        """SET das sub-issues: adiciona faltantes e remove as não declaradas.
+
+        known_current (se fornecido) evita o GET de listagem das sub-issues.
+        """
         self._penalty_check()
         desired = {str(c) for c in (children_ids or [])}
-        current = set(self._list_sub_issue_numbers(issue_id))
+        if known_current is not None:
+            current = {str(c) for c in known_current}
+        else:
+            current = set(self._list_sub_issue_numbers(issue_id))
         log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - children {sorted(desired)}",
                  operation="set_children", board_id=board_id, issue_id=issue_id)
         for child in desired - current:
@@ -652,21 +1053,29 @@ class GitHubBoardAdapter(BoardPort):
         for child in current - desired:
             self._remove_sub_issue(issue_id, child)
 
-    def set_parent(self, board_id: str, issue_id: str, parent_id: str | None) -> None:
-        """Define o parent desta issue (sub-issue de parent_id). None remove."""
+    def set_parent(self, board_id: str, issue_id: str, parent_id: str | None,
+                   known_current=_UNSET) -> None:
+        """Define o parent desta issue (sub-issue de parent_id). None remove.
+
+        known_current (se != _UNSET) evita o GET do parent atual; passe o
+        number do parent conhecido ou None se sabidamente sem parent.
+        """
         self._penalty_check()
         owner, repo = self._repo.split("/")
         # Parent atual
-        current_parent = None
-        try:
-            result = self._gh(
-                "api", f"/repos/{owner}/{repo}/issues/{issue_id}/parent",
-                "-H", "Accept: application/vnd.github+json",
-            )
-            if result:
-                current_parent = str(json.loads(result).get("number"))
-        except Exception:
+        if known_current is not _UNSET:
+            current_parent = str(known_current) if known_current else None
+        else:
             current_parent = None
+            try:
+                result = self._gh(
+                    "api", f"/repos/{owner}/{repo}/issues/{issue_id}/parent",
+                    "-H", "Accept: application/vnd.github+json",
+                )
+                if result:
+                    current_parent = str(json.loads(result).get("number"))
+            except Exception:
+                current_parent = None
 
         log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - parent {parent_id}",
                  operation="set_parent", board_id=board_id, issue_id=issue_id)
@@ -697,13 +1106,20 @@ class GitHubBoardAdapter(BoardPort):
             log.warning("GitHub", f"#{issue_number} - falha ao listar blocking: {e}")
         return blocked_by, blocks
 
-    def set_blocked_by(self, board_id: str, issue_id: str, blocker_ids: list[str]) -> None:
-        """SET das issues que bloqueiam esta (blocked_by)."""
+    def set_blocked_by(self, board_id: str, issue_id: str, blocker_ids: list[str],
+                       known_current: list[str] | None = None) -> None:
+        """SET das issues que bloqueiam esta (blocked_by).
+
+        known_current (se fornecido) evita as 2 chamadas REST de _get_dependencies.
+        """
         self._penalty_check()
         owner, repo = self._repo.split("/")
         desired = {str(b) for b in (blocker_ids or [])}
-        current_by, _ = self._get_dependencies(issue_id)
-        current = set(current_by)
+        if known_current is not None:
+            current = {str(b) for b in known_current}
+        else:
+            current_by, _ = self._get_dependencies(issue_id)
+            current = set(current_by)
         log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - blocked_by {sorted(desired)}",
                  operation="set_blocked_by", board_id=board_id, issue_id=issue_id)
         for b in desired - current:
@@ -718,18 +1134,26 @@ class GitHubBoardAdapter(BoardPort):
                          "-H", "Accept: application/vnd.github+json",
                          f"/repos/{owner}/{repo}/issues/{issue_id}/dependencies/blocked_by/{db}")
 
-    def set_blocks(self, board_id: str, issue_id: str, blocked_ids: list[str]) -> None:
+    def set_blocks(self, board_id: str, issue_id: str, blocked_ids: list[str],
+                   known_current: list[str] | None = None) -> None:
         """SET das issues que esta bloqueia.
 
         A API só escreve no lado blocked_by; 'blocks' em N equivale a
         blocked_by desta em N. Implementado adicionando/removendo esta issue
         como blocker em cada N declarado.
+
+        known_current (se fornecido) evita as 2 chamadas REST de _get_dependencies.
         """
         self._penalty_check()
         owner, repo = self._repo.split("/")
         desired = {str(b) for b in (blocked_ids or [])}
-        _, current_blocks = self._get_dependencies(issue_id)
-        current = set(current_blocks)
+        if known_current is not None:
+            current = {str(b) for b in known_current}
+        else:
+            _, current_blocks = self._get_dependencies(issue_id)
+            current = set(current_blocks)
+        if desired == current:
+            return
         this_db = self._get_issue_db_id(issue_id)
         if not this_db:
             log.warning("GitHub", f"#{issue_id} - databaseId não resolvido para set_blocks")
@@ -752,17 +1176,14 @@ class GitHubBoardAdapter(BoardPort):
         owner, repo = self._repo.split("/")
         log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - labels {labels}",
                  operation="set_labels", board_id=board_id, issue_id=issue_id)
-        # PUT substitui todas as labels; lista vazia remove todas.
+        # PUT substitui todas as labels; usa --input - com JSON para garantir
+        # que a API receba um array válido (inclusive array vazio).
+        payload = json.dumps({"labels": labels or []})
         args = ["api", "-X", "PUT",
                 "-H", "Accept: application/vnd.github+json",
+                "--input", "-",
                 f"/repos/{owner}/{repo}/issues/{issue_id}/labels"]
-        if labels:
-            for name in labels:
-                args += ["-f", f"labels[]={name}"]
-        else:
-            # Corpo explícito com array vazio
-            args += ["-f", "labels="]
-        self._gh(*args)
+        self._gh(*args, stdin=payload)
 
     def add_label(self, board_id: str, issue_id: str, label: str) -> None:
         """Adiciona uma única label (mantém as demais) via POST REST."""
