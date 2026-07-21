@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.core.commands import annotations_doc, split_body
+from src.core.commands import annotations_doc, AGENT_LEVEL_PREFIX
 from src.core.snapshot import BOARDS_DIR
 
 REPO_DIR = Path("repo")
@@ -111,19 +111,17 @@ def _assert_no_protected(prompt: str) -> None:
 
 
 def agent_level(issue: dict) -> str | None:
-    """Lê o nível de agente da issue (tag /agent_level no bloco @---).
+    """Lê o nível de agente da issue a partir das labels do board.
 
-    O nível funciona como um "planning poker" simplificado (low|medium|high
-    por padrão, configurável pelo usuário). É persistido no body via
-    /agent_level.
+    O nível é armazenado como label `agent-level-<nível>` no GitHub
+    (ex.: agent-level-low, agent-level-medium, agent-level-high).
+    Essa label é sincronizada nativamente pelo board, eliminando a
+    dependência de estado local que causava o bug de preservação no sync-down.
     """
-    body_path = Path(issue.get("body_path", ""))
-    if not body_path.exists():
-        return None
-    content = body_path.read_text(encoding="utf-8")
-    raw_body = content.split("\n", 1)[1] if "\n" in content else ""
-    _, cmds = split_body(raw_body)
-    return cmds.agent_level
+    for label in issue.get("labels", []) or []:
+        if label.startswith(AGENT_LEVEL_PREFIX):
+            return label[len(AGENT_LEVEL_PREFIX):]
+    return None
 
 
 def resolve_agent_id(col: dict, issue: dict) -> str:

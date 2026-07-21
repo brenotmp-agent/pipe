@@ -3,7 +3,7 @@ from src.core.config import check_config as validate_config, ConfigError, SSH_KE
 from src.core.board import Board, PenaltyException, BoardAccessError
 from src.core.snapshot import Snapshot
 from src.core.change_queue import ChangeQueue, QUEUE_FILE
-from src.core.sync import sync_remote, detect_local_changes, apply_changes
+from src.core.sync import sync_remote, detect_local_changes, apply_changes, migrate_agent_level_labels
 from src.core.version import VERSION
 from src.adapters.github_board import GitHubBoardAdapter
 from pathlib import Path
@@ -135,6 +135,18 @@ def board_full_sync(config: dict):
     if recovered:
         log.info("Board", f"{recovered} item(ns) recuperado(s) de execução anterior")
 
+    # Migração one-shot: issues com /agent_level no body mas sem label no board.
+    # DEVE ocorrer ANTES de detect_board_changes para garantir que o CHANGE_UP
+    # de migração entre na fila antes de qualquer CHANGE_DOWN da mesma issue.
+    # Assim o sync-up grava a label no board antes do sync-down reescrever o
+    # body — evitando perda silenciosa do agent_level em issues legadas que
+    # foram alteradas remotamente no mesmo ciclo de full sync.
+    total_migrated = 0
+    for board_id in board.board_ids(config):
+        total_migrated += migrate_agent_level_labels(board_id, queue)
+    if total_migrated:
+        log.info("Board", f"Migração agent_level: {total_migrated} issue(s) enfileirada(s) para gravar label")
+
     # Detectar mudanças remotas
     log.info("Board", "Detectando mudanças remotas")
     total = 0
@@ -150,7 +162,7 @@ def board_full_sync(config: dict):
                 break
             except PenaltyException as e:
                 back_at = (datetime.now() + timedelta(seconds=e.wait_seconds)).strftime('%H:%M:%S')
-                log.warning("Board", f"Rate limit em '{board_id}' - retorna às {back_at}")
+                log.warning("Board", f"Rate limit em '{board_id}' - retoma às {back_at}")
                 time.sleep(e.wait_seconds)
     log.info("Board", f"{total} mudança(s) remota(s) adicionada(s) à fila")
 
