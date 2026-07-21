@@ -77,8 +77,73 @@ Ao executar, o sistema cria arquivos vazios automaticamente e exige preenchiment
 
 ## Uso
 
+### Execução local (Python)
+
 ```bash
 python -m src
+```
+
+### Execução via Docker Compose (recomendado para produção)
+
+**Pré-requisitos:**
+- Docker e Docker Compose instalados
+- `gh auth login` executado no host (gera `~/.config/gh/`)
+- Chave SSH configurada no GitHub (`~/.ssh/id_ed25519`)
+- Token do GitHub com escopos `repo` e `project`
+
+**1. Preparar o contexto de build (copia o binário kiro-cli):**
+
+```bash
+./prepare-docker.sh
+```
+
+**2. Criar o arquivo `.env` com o token do GitHub:**
+
+```bash
+cp .env.example .env
+# Editar .env e preencher GH_TOKEN (e opcionalmente SSH_KEY_FILE, GH_CONFIG_DIR)
+```
+
+**3. Garantir que o `pipe.yml` existe na raiz do projeto:**
+
+```bash
+# pipe.yml não é versionado — deve ser criado/copiado manualmente
+# Ver seção "Configuração → Arquivo pipe.yml" abaixo para o formato
+```
+
+**4. Build e execução:**
+
+```bash
+docker compose build
+docker compose up
+```
+
+**5. Para rodar em background:**
+
+```bash
+docker compose up -d
+docker compose logs -f   # acompanhar logs
+```
+
+**6. Para parar:**
+
+```bash
+docker compose down
+```
+
+**Volumes persistidos entre reinícios:**
+
+| Volume | Caminho no container | Conteúdo |
+|--------|---------------------|----------|
+| `pipe_state` | `/app/.pipe` | Snapshots, fila de mudanças, índice de sessões |
+| `pipe_repos` | `/app/repo` | Clones dos repositórios git |
+| `pipe_logs` | `/app/logs` | Logs de execução |
+
+Os volumes são criados automaticamente pelo Docker na primeira execução.
+Para limpar o estado interno (forçar re-sync completo), remova os volumes:
+
+```bash
+docker compose down -v
 ```
 
 ## Estrutura
