@@ -433,6 +433,70 @@ no fluxo up e para a checagem de par recíproco. São gravados em todo evento
 up (estado desejado) e down (estado real do board). `status` é o campo de
 sincronismo (crash recovery), distinto de `state` (open/closed da issue).
 
+## Robustez e Segurança do Estado (v1.5.0 — Incidente "Issue Fantasma")
+
+Pacote de correções derivado do incidente "Issue Fantasma" (registro completo
+em `doc/incidente/issue-fantasma/ticket.md`). O incidente teve causa raiz
+tripla: (1) agente com escrita irrestrita ao estado interno; (2) prefixo
+numérico no nome de arquivo interpretado como ID de issue real; (3) ausência de
+tratamento para "issue inexistente" combinada com fila *at-least-once*. As
+issues reais #1, #2, #3 (épicos) foram fechadas indevidamente por colisão de
+número no espaço compartilhado de IDs do repositório.
+
+Quatro correções foram entregues nesta release. A Correção 4 (validação
+pós-agente por comparação de mtime) **não** foi implementada.
+
+### Correção 2 — CONTEXT.md gerado no startup (`context_generator.py`)
+
+`generate_context(config)` roda em `startup()` (`src/__main__.py`) e gera dois
+arquivos a partir do `pipe.yml`:
+
+- `.pipe/CONTEXT.md` — instruções em Markdown.
+- `.kiro/agents/pipe_context.json` — agente kiro-cli (`tools: ["*"]`,
+  `allowedTools: ["@builtin"]`) com o mesmo conteúdo no campo `prompt`.
+
+Regeneração: recria se o arquivo não existir OU se `pipe.yml.mtime >
+CONTEXT.md.mtime`. O conteúdo tem quatro blocos: restrições de sistema (arquivos
+protegidos), regras de nomeação de issue (`<slug>-body.md` sem prefixo
+numérico), tabela de boards/colunas e git flow/branches.
+
+Injeção: o adapter `kiro_cli_agent.py` passa `--agent pipe_context` (nunca
+inline no prompt) e exporta `KIRO_HOME=<esteira>/.kiro` para o kiro-cli localizar
+o agente gerado (o cwd do processo é `repo/<repo_id>`, então sem `KIRO_HOME` o
+kiro-cli buscaria agentes no diretório errado).
+
+> Distinto do `CONTEXT.md` da raiz (este arquivo, técnico e manual). O gerado
+> fica em `.pipe/` e é sobrescrito a cada restart.
+
+### Correção 1 — Estado interno read-only para o agente (`agent.py`)
+
+`PROTECTED_PATHS` (glob) centraliza os arquivos de estado interno:
+`.pipe/boards/*/snapshot.json`, `.pipe/changeQueue.json`, `.pipe/throttle.json`,
+`.pipe/throttle-*.json`. `build_prompt` chama `_assert_no_protected(prompt)`,
+que tokeniza o prompt e casa cada token contra os padrões (fnmatch + match de
+sufixo para paths absolutos). Se algum padrão aparecer, levanta `ValueError` —
+o path do snapshot nunca chega ao agente. O `CONTEXT.md` gerado reforça a regra
+em linguagem natural.
+
+### Correção 3 — Tratamento de erro irrecuperável no sync (`sync.py`)
+
+`_apply_change_up` e `_apply_delete_up` capturam a exceção cujo texto contém
+`Could not resolve to an issue or pull request` (issue inexistente no GitHub):
+logam warning `removendo do snapshot (issue fantasma)`, removem a entrada do
+snapshot e **retornam** (descartam o evento) em vez de propagá-lo. Sem esse
+tratamento, a fila *at-least-once* re-enfileirava o evento a cada ciclo
+(loop na v1.4.2; crash-loop na base atual, sem o `except Exception` amplo).
+Qualquer outra exceção continua propagando.
+
+### Correção 5 — Isolamento de IDs entre boards (`github_board.py`)
+
+Antes de `update_issue` e `close_issue`, `_assert_belongs_to_board` chama
+`_belongs_to_board`, que consulta via GraphQL os `projectItems` da issue e
+confirma que o `project_id` do board alvo está entre eles. Se não pertencer, a
+operação é abortada com warning `não pertence a este board — operação abortada`
+e o método retorna sem efeito. Custo: +1 chamada GraphQL por operação
+destrutiva (dentro da quota de 5000 pontos/hora).
+
 ## Pendências
 
 - [ ] Implementar adapter ClickUp

@@ -547,7 +547,16 @@ def _apply_change_up(board_id: str, item: ChangeItem, board_obj: Board,
     body, cmds = split_body(raw_body)
 
     # Atualizar body/title no board (body limpo, sem o bloco @---)
-    board_obj.update_issue(board_id, item.id, title=title, body=body)
+    try:
+        board_obj.update_issue(board_id, item.id, title=title, body=body)
+    except Exception as e:
+        if "Could not resolve to an issue or pull request" in str(e):
+            log.warning("Sync", f"[{board_id}] #{item.id} não existe no GitHub — "
+                        "removendo do snapshot (issue fantasma)")
+            snap.issues = [i for i in snap.issues if str(i.get("id")) != str(item.id)]
+            snap.save()
+            return
+        raise
 
     # Aplicar comandos como estado autoritativo, comparando contra o estado
     # conhecido (snapshot): só chama o setter do atributo que realmente mudou,
@@ -714,7 +723,17 @@ def _bake_column_events(board_id: str, body_path: Path, config: dict,
 
 def _apply_delete_up(board_id: str, item: ChangeItem, board_obj: Board):
     """Fecha issue no board (arquivo local já foi removido)."""
-    board_obj.close_issue(board_id, item.id)
+    try:
+        board_obj.close_issue(board_id, item.id)
+    except Exception as e:
+        if "Could not resolve to an issue or pull request" in str(e):
+            log.warning("Sync", f"[{board_id}] #{item.id} não existe no GitHub — "
+                        "removendo do snapshot (issue fantasma)")
+            snap = Snapshot(board_id).load()
+            snap.issues = [i for i in snap.issues if str(i.get("id")) != str(item.id)]
+            snap.save()
+            return
+        raise
 
     snap = Snapshot(board_id).load()
     snap.issues = [i for i in snap.issues if str(i.get("id")) != str(item.id)]

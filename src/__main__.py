@@ -59,6 +59,11 @@ def startup(config: dict):
     _setup_ssh()
     REPO_DIR.mkdir(exist_ok=True)
 
+    # Gerar CONTEXT.md para instruir agentes sobre regras e estrutura do sistema
+    from src.core.context_generator import generate_context
+    generate_context(config)
+    log.info("Startup", "CONTEXT.md gerado/atualizado")
+
     # Limpa a fila de mudanças de execuções anteriores
     if QUEUE_FILE.exists():
         log.info("Startup", "Removendo fila de mudanças anterior")
