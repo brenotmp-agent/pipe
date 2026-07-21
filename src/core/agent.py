@@ -165,6 +165,8 @@ class AgentParams:
     work_dir: str          # diretório de trabalho do agente (clone em repo/<repo_id>)
     repo_id: str = None    # id do repositório alvo (chave em git.repo)
     context: str = None
+    col_name: str = ""     # nome humanizado da coluna/etapa (log de terminal)
+    title: str = ""        # título da issue (log de terminal)
 
 
 class AgentPort(ABC):

@@ -5,7 +5,9 @@ from src.core.snapshot import Snapshot
 from src.core.change_queue import ChangeQueue, QUEUE_FILE
 from src.core.sync import sync_remote, detect_local_changes, apply_changes, migrate_agent_level_labels
 from src.core.version import VERSION
+from src.core.agent import AgentParams, build_prompt, resolve_agent_id, resolve_repo_id, resolve_work_dir
 from src.adapters.github_board import GitHubBoardAdapter
+from src.adapters.kiro_cli_agent import KiroCliAgent
 from pathlib import Path
 from datetime import datetime, timedelta
 import subprocess
@@ -313,10 +315,6 @@ def call_agent(config: dict, task: dict | None):
     col = task["column"]
     issue = task["issue"]
 
-    from src.core.agent import (AgentParams, build_prompt,
-                                resolve_agent_id, resolve_repo_id,
-                                resolve_work_dir)
-    from src.adapters.kiro_cli_agent import KiroCliAgent
     from src.core.config import CONTEXTS_DIR
 
     agent_id = resolve_agent_id(col, issue)
@@ -343,6 +341,13 @@ def call_agent(config: dict, task: dict | None):
 
     prompt = build_prompt(config, task)
 
+    # Extrair título da issue (primeira linha não-vazia do body, sem prefixo '# ')
+    title = ""
+    body_path = Path(issue.get("body_path", ""))
+    if body_path.exists():
+        first_line = body_path.read_text(encoding="utf-8").split("\n", 1)[0]
+        title = first_line.lstrip("# ").strip()
+
     params = AgentParams(
         platform=platform,
         agent_id=agent_id,
@@ -354,6 +359,8 @@ def call_agent(config: dict, task: dict | None):
         prompt=prompt,
         work_dir=str(work_dir),
         repo_id=repo_id,
+        col_name=col.get("name", col_id),
+        title=title,
     )
 
     adapter = KiroCliAgent()
