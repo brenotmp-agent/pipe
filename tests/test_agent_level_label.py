@@ -354,14 +354,176 @@ def test_all_labels_com_need_human_e_agent_level():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 10. IssueCommands.is_empty() reconhece agent_level como campo não-vazio
+# 10. IssueCommands.is_empty(): garante que agent_level conta como não-vazio
 # ══════════════════════════════════════════════════════════════════════════════
 
-def test_is_empty_falso_quando_agent_level_definido():
-    cmds = IssueCommands(agent_level="low")
-    assert cmds.is_empty() is False
-
-
 def test_is_empty_verdadeiro_sem_campos():
-    cmds = IssueCommands()
-    assert cmds.is_empty() is True
+    """IssueCommands sem nenhum campo preenchido deve ser considerado vazio."""
+    assert IssueCommands().is_empty() is True
+
+
+def test_is_empty_falso_quando_agent_level_definido():
+    """IssueCommands cujo único campo é agent_level NÃO deve ser vazio.
+
+    Protege o caminho de produção em sync.py (create-up): se o único comando
+    declarado for /agent_level high, is_empty() deve retornar False para que
+    apply_commands seja chamado e a label agent-level-high seja aplicada na
+    criação da issue. Sem essa garantia, a feature de override-agent silenciosamente
+    não funcionaria em issues recém-criadas.
+    """
+    assert IssueCommands(agent_level="low").is_empty() is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 11. serialize_commands: ordem canônica com agent_level e outros campos
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_serialize_ordem_canonica_agent_level_apos_labels():
+    """/agent_level deve aparecer depois de /labels na serialização canônica."""
+    cmds = IssueCommands(labels=["backend"], agent_level="high", need_human=True)
+    serialized = serialize_commands(cmds)
+    lines = [l for l in serialized.splitlines() if l.startswith("/")]
+    idx_labels = next((i for i, l in enumerate(lines) if l.startswith("/labels")), -1)
+    idx_level = next((i for i, l in enumerate(lines) if l.startswith("/agent_level")), -1)
+    idx_need_human = next((i for i, l in enumerate(lines) if l.startswith("/need_human")), -1)
+    assert idx_labels != -1, "/labels deve estar presente"
+    assert idx_level != -1, "/agent_level deve estar presente"
+    assert idx_need_human != -1, "/need_human deve estar presente"
+    # Ordem: /labels < /agent_level < /need_human
+    assert idx_labels < idx_level < idx_need_human, (
+        f"Ordem esperada /labels < /agent_level < /need_human, "
+        f"mas foi labels={idx_labels}, level={idx_level}, need_human={idx_need_human}"
+    )
+
+
+def test_serialize_com_todos_os_campos():
+    """serialize_commands funciona corretamente com todos os campos preenchidos."""
+    cmds = IssueCommands(
+        parent="10",
+        children=["11", "12"],
+        blocked_by=["5"],
+        blocks=["20"],
+        labels=["backend", "security"],
+        agent_level="medium",
+        close="completed",
+        need_human=True,
+    )
+    serialized = serialize_commands(cmds)
+    assert "/parent #10" in serialized
+    assert "/children #11, #12" in serialized
+    assert "/blocked_by #5" in serialized
+    assert "/blocks #20" in serialized
+    assert "/labels backend, security" in serialized
+    assert "/agent_level medium" in serialized
+    assert "/need_human" in serialized
+    assert "/close completed" in serialized
+    # agent-level-* não deve aparecer em /labels
+    for line in serialized.splitlines():
+        if line.startswith("/labels"):
+            assert "agent-level" not in line
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 12. all_labels: colisão entre labels[] com agent-level-X e agent_level=Y
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_all_labels_colisao_label_x_e_level_y_nao_duplica_e_nao_perde():
+    """Se labels tem agent-level-low e agent_level='high', all_labels emite ambas sem duplicar.
+
+    Esse cenário não deveria ocorrer no fluxo normal (from_issue filtra labels),
+    mas all_labels deve se comportar de forma defensiva: emite a label derivada
+    de agent_level e preserva o que está em labels sem deduplicar por semântica.
+    """
+    cmds = IssueCommands(labels=["agent-level-low"], agent_level="high")
+    all_lbs = cmds.all_labels()
+    # agent-level-high deve aparecer (derivado de agent_level)
+    assert "agent-level-high" in all_lbs
+    # agent-level-low veio de labels (não filtrado aqui, pois from_issue é quem filtra)
+    assert "agent-level-low" in all_lbs
+
+
+def test_all_labels_labels_vazio_e_agent_level_definido():
+    """labels vazio + agent_level definido emite apenas a label de nível."""
+    cmds = IssueCommands(labels=[], agent_level="low")
+    all_lbs = cmds.all_labels()
+    assert all_lbs == ["agent-level-low"]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 13. apply_events_to_commands: eventos de coluna não afetam agent_level
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_eventos_coluna_need_human_nao_zera_agent_level():
+    """Evento 'need_human' de on_in/on_out não deve alterar agent_level."""
+    from src.core.commands import apply_events_to_commands
+    cmds = IssueCommands(labels=["backend"], agent_level="high")
+    apply_events_to_commands(cmds, ["need_human"])
+    assert cmds.agent_level == "high"
+    assert cmds.need_human is True
+
+
+def test_eventos_coluna_close_nao_zera_agent_level():
+    """Evento 'close' de on_in/on_out não deve alterar agent_level."""
+    from src.core.commands import apply_events_to_commands
+    cmds = IssueCommands(labels=["backend"], agent_level="medium")
+    apply_events_to_commands(cmds, ["close"])
+    assert cmds.agent_level == "medium"
+    assert cmds.close == "completed"
+
+
+def test_eventos_coluna_label_normal_nao_toca_agent_level():
+    """Adicionar label comum via evento não afeta agent_level."""
+    from src.core.commands import apply_events_to_commands
+    cmds = IssueCommands(labels=[], agent_level="low")
+    apply_events_to_commands(cmds, ["security"])
+    assert cmds.agent_level == "low"
+    assert "security" in cmds.labels
+
+
+def test_eventos_coluna_remover_label_normal_nao_toca_agent_level():
+    """Remover label comum via evento não afeta agent_level."""
+    from src.core.commands import apply_events_to_commands
+    cmds = IssueCommands(labels=["backend", "security"], agent_level="high")
+    apply_events_to_commands(cmds, ["-backend"])
+    assert cmds.agent_level == "high"
+    assert "backend" not in cmds.labels
+    assert "security" in cmds.labels
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 14. from_issue: robustez com labels None e lista vazia
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_from_issue_labels_none_nao_levanta_excecao():
+    """from_issue não deve levantar exceção quando issue.labels é None."""
+    issue = _make_issue([])
+    issue.labels = None
+    cmds = from_issue(issue)
+    assert cmds.agent_level is None
+    assert cmds.labels == []
+
+
+def test_from_issue_labels_vazias_retorna_estado_vazio():
+    """from_issue com lista de labels vazia retorna IssueCommands sem nível."""
+    issue = _make_issue([])
+    cmds = from_issue(issue)
+    assert cmds.agent_level is None
+    assert cmds.need_human is False
+    assert cmds.labels == []
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 15. agent_level(): robustez com labels None
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_agent_level_labels_none_retorna_none():
+    """agent_level() não deve falhar quando issue['labels'] é None."""
+    issue = {"labels": None, "body_path": ""}
+    assert agent_level(issue) is None
+
+
+def test_agent_level_sem_chave_labels_retorna_none():
+    """agent_level() não deve falhar quando 'labels' não está no dict."""
+    issue = {"body_path": ""}
+    assert agent_level(issue) is None
+
