@@ -3,7 +3,9 @@
 Status: draft
 Owner: arquitetura (Lucas Almeida)
 Stage: Arquitetura
-Last updated: 2026-07-07
+Last updated: 2026-07-21
+Localização: `doc/stories/rodar-no-docker/arquitetura.md` (indexada em
+`doc/README.md` e `doc/stories/rodar-no-docker/README.md`)
 
 ## Inputs
 
