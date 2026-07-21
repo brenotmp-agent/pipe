@@ -30,7 +30,20 @@ def _issue_files(board_id: str, col_id: str, issue_id: str, slug: str) -> dict:
 
 
 def _find_issue_files(board_id: str, issue_id: str) -> Path | None:
-    """Encontra o arquivo body de uma issue em qualquer coluna do board."""
+    """Encontra o arquivo body de uma issue em qualquer coluna do board.
+
+    Prioriza o path registrado no snapshot para evitar retornar um arquivo
+    órfão quando há colisão de IDs.
+    """
+    # Primeiro, verificar se o snapshot possui body_path registrado.
+    snap = Snapshot(board_id).load()
+    issue_data = snap.issue(issue_id)
+    if issue_data and issue_data.get("body_path"):
+        candidate = Path(issue_data["body_path"])
+        if candidate.exists():
+            return candidate
+
+    # Fallback: rglob
     board_dir = BOARDS_DIR / board_id
     if not board_dir.exists():
         return None
@@ -275,12 +288,24 @@ def detect_local_changes(board_id: str, queue: ChangeQueue):
     board_dir = BOARDS_DIR / board_id
     snapshot_by_id = {str(i["id"]): i for i in snap.issues if i.get("id")}
 
+    # Conjunto de body_paths registrados no snapshot (para resolver colisões).
+    snapshot_paths = {Path(i["body_path"]).resolve()
+                      for i in snap.issues if i.get("body_path")}
+
     # Scan de arquivos body locais
     local_bodies = {}  # id -> Path
     for body_file in board_dir.rglob("*-body.md"):
         match = re.match(r"^(\d+)-", body_file.name)
         if match:
-            local_bodies[match.group(1)] = body_file
+            issue_id = match.group(1)
+            # Em caso de colisão (dois arquivos com mesmo ID numérico),
+            # priorizar o que já está registrado no snapshot.
+            if issue_id in local_bodies:
+                if body_file.resolve() in snapshot_paths:
+                    local_bodies[issue_id] = body_file
+                # senão, manter o que já está (pode ser o do snapshot)
+            else:
+                local_bodies[issue_id] = body_file
         elif body_file.name.count("-") >= 2:
             # Arquivo sem id numérico = issue criada localmente (sem id)
             body_path_str = str(body_file)
