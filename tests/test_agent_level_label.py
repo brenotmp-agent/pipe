@@ -354,6 +354,27 @@ def test_all_labels_com_need_human_e_agent_level():
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# 10. IssueCommands.is_empty(): garante que agent_level conta como não-vazio
+# ══════════════════════════════════════════════════════════════════════════════
+
+def test_is_empty_verdadeiro_sem_campos():
+    """IssueCommands sem nenhum campo preenchido deve ser considerado vazio."""
+    assert IssueCommands().is_empty() is True
+
+
+def test_is_empty_falso_quando_agent_level_definido():
+    """IssueCommands cujo único campo é agent_level NÃO deve ser vazio.
+
+    Protege o caminho de produção em sync.py (create-up): se o único comando
+    declarado for /agent_level high, is_empty() deve retornar False para que
+    apply_commands seja chamado e a label agent-level-high seja aplicada na
+    criação da issue. Sem essa garantia, a feature de override-agent silenciosamente
+    não funcionaria em issues recém-criadas.
+    """
+    assert IssueCommands(agent_level="low").is_empty() is False
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # 11. serialize_commands: ordem canônica com agent_level e outros campos
 # ══════════════════════════════════════════════════════════════════════════════
 
