@@ -27,8 +27,9 @@ class KiroCliAgent(AgentPort):
 
     def execute(self, params: AgentParams) -> None:
         log_path = self._create_log(params)
-        log.info("Agent", f"[{params.board_id}] #{params.issue_id} agent='{params.agent_name}' "
-                          f"model='{params.model}' cwd='{params.work_dir}' log='{log_path}'")
+        title_str = f' "{params.title}"' if params.title else ""
+        col_str = f" @ {params.col_name}" if params.col_name else ""
+        log.info("Agent", f"[{params.board_id}] #{params.issue_id}{title_str}{col_str} agent='{params.agent_name}' log='{log_path}'")
         try:
             work_dir = Path(params.work_dir)
             if not work_dir.is_dir():

@@ -70,6 +70,8 @@ class AgentParams:
     work_dir: str          # diretório de trabalho do agente (clone em repo/<repo_id>)
     repo_id: str = None    # id do repositório alvo (chave em git.repo)
     context: str = None
+    col_name: str = None   # nome humanizado da coluna (etapa/fase)
+    title: str = None      # título da issue
 
 
 class AgentPort(ABC):

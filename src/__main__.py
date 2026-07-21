@@ -301,6 +301,7 @@ def call_agent(config: dict, task: dict | None):
                                 resolve_work_dir)
     from src.adapters.kiro_cli_agent import KiroCliAgent
     from src.core.config import CONTEXTS_DIR
+    from pathlib import Path
 
     agent_id = resolve_agent_id(col, issue)
     # Resolver plataforma e config do agente
@@ -326,6 +327,18 @@ def call_agent(config: dict, task: dict | None):
 
     prompt = build_prompt(config, task)
 
+    # Extrair título da issue (1ª linha do body.md)
+    title = ""
+    body_path = Path(issue.get("body_path", "")).resolve()
+    if body_path.exists():
+        first_line = body_path.read_text(encoding="utf-8").split("\n", 1)[0]
+        title = first_line.lstrip("# ").strip()
+    slug = body_path.stem.removesuffix("-body")
+    title = title or slug
+
+    # Nome humanizado da etapa/coluna
+    col_name = col.get("name", col_id)
+
     params = AgentParams(
         platform=platform,
         agent_id=agent_id,
@@ -337,6 +350,8 @@ def call_agent(config: dict, task: dict | None):
         prompt=prompt,
         work_dir=str(work_dir),
         repo_id=repo_id,
+        col_name=col_name,
+        title=title,
     )
 
     adapter = KiroCliAgent()
