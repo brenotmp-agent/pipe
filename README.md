@@ -204,8 +204,9 @@ Se houve qualquer atividade (sync movimentou algo OU existe tarefa para executar
 ## Seleção de Tarefas (keep_task)
 
 - Boards ordenados por prioridade (menor = mais prioritário)
-- Issues ordenadas por data (mais antiga primeiro)
-- Auto-advance de coluna `todo` para próxima coluna
+- Dentro do board, varre coluna a coluna da última para a primeira (`backlog`/`todo` por último)
+- Dentro de cada coluna, pega a issue elegível mais antiga (por data)
+- Auto-advance de coluna `todo` para próxima coluna (só ocorre se nenhuma coluna posterior tiver tarefa pronta)
 - `parallel: false` → bloqueia auto-advance se já existe issue ativa
 - Issues com `/need_human` ou `/blocked_by` no body são ignoradas
 

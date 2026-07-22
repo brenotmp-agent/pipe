@@ -199,8 +199,9 @@ Cobertura em `tests/test_rate_limit_detection.py`.
 ## Seleção de Tarefas (keep_task)
 
 - Boards ordenados por prioridade (menor = mais prioritário)
-- Issues ordenadas por `created_at` / `updated_at` (mais antiga primeiro)
-- Auto-advance: coluna `todo` → próxima coluna (apenas move arquivos, sync propaga)
+- Dentro do board, varredura coluna a coluna: da última coluna para a primeira (`backlog`/`todo` por último)
+- Dentro de cada coluna, seleciona a mais antiga elegível (`created_at` / `updated_at`)
+- Auto-advance: coluna `todo` → próxima coluna (apenas move arquivos, sync propaga); só dispara se nenhuma coluna posterior tiver tarefa elegível
 - `parallel: false` → bloqueia auto-advance se issue ativa fora de terminais
 - Elegível: `status == "ok"` + coluna com `agent` + coluna com `change.advance`
 - Bloqueada: `/need_human` ou `/blocked_by` no body

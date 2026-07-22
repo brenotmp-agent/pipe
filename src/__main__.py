@@ -202,7 +202,9 @@ def keep_task(board_id: str, config: dict) -> dict | None:
     """Seleciona a próxima tarefa elegível no board indicado.
 
     Lógica:
-    - Issues ordenadas por created_at (mais antiga primeiro)
+    - Varre coluna a coluna, da última para a primeira (backlog/todo por último)
+    - Dentro de cada coluna, pega a issue elegível mais antiga (created_at,
+      com fallback para updated_at)
     - Se issue está em 'todo', faz auto-advance local e retorna None (espera sync)
     - Elegível se: status=='ok', coluna tem 'agent', coluna tem 'change.advance'
     - parallel:false → bloqueia auto-advance se já existe issue ativa
@@ -223,8 +225,15 @@ def keep_task(board_id: str, config: dict) -> dict | None:
         inactive = (terminal | {todo_col}) if todo_col else terminal
         block_auto_advance = any(i["column"] not in inactive for i in issues)
 
-    # Ordenar por created_at (campo pode não existir)
-    issues.sort(key=lambda i: i.get("created_at") or i.get("updated_at") or "")
+    # Ordenar coluna a coluna (última coluna primeiro, backlog/todo por último)
+    # e, dentro de cada coluna, pela mais antiga (created_at, fallback updated_at).
+    # col_rank: índice da coluna na config (backlog=0 ... encerrado=N).
+    # Colunas desconhecidas caem para o fim (rank -1 → chave positiva).
+    col_rank = {col_id: idx for idx, col_id in enumerate(columns)}
+    issues.sort(key=lambda i: (
+        -col_rank.get(i["column"], -1),
+        i.get("created_at") or i.get("updated_at") or "",
+    ))
 
     for issue in issues:
         col_id = issue["column"]
