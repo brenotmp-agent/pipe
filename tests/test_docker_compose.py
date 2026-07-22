@@ -11,8 +11,9 @@ aceitação da US-04 (#46) / contrato D-05:
   - AC-06: nenhum bind mount aponta para /app inteiro (D-05)
 
 Testes estáticos (não sobem containers) — executam sem Docker.
-Testes que requerem Docker ficam em TestDockerComposeIntegracao,
-marcados com @pytest.mark.docker (skip automático se daemon ausente).
+Testes que requerem Docker ficam em TestDockerComposeIntegracao e são
+ignorados automaticamente quando o daemon Docker não está disponível
+(DOCKER_SKIP = pytest.mark.skipif(...) definido a nível de módulo).
 """
 
 import re
@@ -26,16 +27,6 @@ COMPOSE_FILE = REPO_ROOT / "docker-compose.yml"
 COMPOSE_EPHEMERAL = REPO_ROOT / "compose.ephemeral.yml"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 GITIGNORE = REPO_ROOT / ".gitignore"
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
-def _volumes_section(text: str) -> str:
-    """Retorna o bloco de volumes do serviço 'pipe' (para grep simples)."""
-    return text
 
 
 # ---------------------------------------------------------------------------
@@ -483,27 +474,6 @@ class TestDockerComposeIntegracao:
         docker compose config          # deve validar sem erro com e sem .env
         pytest tests/test_docker_compose.py::TestDockerComposeIntegracao -v
     """
-
-    def _compose_config(self, env: dict | None = None) -> subprocess.CompletedProcess:
-        """Executa 'docker compose config' e retorna o resultado."""
-        import os
-
-        run_env = dict(os.environ)
-        if env is not None:
-            run_env.update(env)
-        # Remove variáveis de estado para testar ausência de .env
-        for var in ("PIPE_STATE_DIR", "PIPE_REPO_DIR", "PIPE_LOGS_DIR"):
-            run_env.pop(var, None)
-        if env:
-            run_env.update(env)
-
-        return subprocess.run(
-            ["docker", "compose", "-f", str(COMPOSE_FILE), "config"],
-            capture_output=True,
-            text=True,
-            cwd=str(REPO_ROOT),
-            env=run_env,
-        )
 
     def test_compose_config_valida_sem_env(self):
         """US-04 AC-03: 'docker compose config' deve validar sem erro mesmo sem .env."""
