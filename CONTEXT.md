@@ -51,7 +51,10 @@ src/
 ```
 main()
 ├── check_config()         # Valida pipe.yml, SSH, contexts
-├── startup()              # Configura SSH, clona repos, limpa fila anterior
+├── startup()              # Configura SSH, preflight, clona repos, limpa fila anterior
+│   ├── _setup_ssh()       # Copia chave SSH para ~/.ssh/id_pipe
+│   ├── preflight()        # Verifica GH_TOKEN + KIRO_API_KEY (fail-fast agregado)
+│   └── [clone, context, queue cleanup]
 ├── board_full_sync()      # Sync completo
 │   ├── Cria .pipe/boards/<board_id>/<col_id>/
 │   ├── Sincroniza snapshot local (mapa de colunas)
@@ -496,6 +499,68 @@ confirma que o `project_id` do board alvo está entre eles. Se não pertencer, a
 operação é abortada com warning `não pertence a este board — operação abortada`
 e o método retorna sem efeito. Custo: +1 chamada GraphQL por operação
 destrutiva (dentro da quota de 5000 pontos/hora).
+
+## Preflight de Credenciais (v1.6.0 — US-02)
+
+Adição do `preflight()` em `src/core/preflight.py`, chamado em `startup()` após
+`_setup_ssh()` e antes do primeiro clone/operação de board. Implementa
+verificação fail-fast agregada de todas as credenciais externas antes de
+iniciar o loop principal.
+
+### Credenciais verificadas
+
+| # | Credencial | Mecanismo | Verificação |
+|---|-----------|-----------|-------------|
+| 1 | SSH | `PIPE_SSH_KEY_FILE` + `_setup_ssh()` | presença do arquivo `~/.ssh/id_pipe` |
+| 2 | GitHub | `GH_TOKEN` (env var) | `gh auth status` exit 0 |
+| 3 | kiro-cli | `KIRO_API_KEY` (env var) | `kiro-cli whoami` exit 0 |
+
+### Comportamento
+
+- Verifica as três credenciais antes de abortar (fail-fast **agregado**).
+- Se qualquer credencial falhar: emite resumo completo de todas as pendências
+  e levanta `SystemExit(1)`.
+- `SystemExit` propaga naturalmente — não é capturado pelo `except Exception`
+  do loop em `main()` (herda de `BaseException`, não de `Exception`).
+- Happy path: retorna normalmente, sequência de boot continua.
+
+### Sequência de boot (após v1.6.0)
+
+```
+main()
+├── check_config()     # valida pipe.yml + PIPE_SSH_KEY_FILE
+├── startup()
+│   ├── _setup_ssh()   # copia chave para ~/.ssh/id_pipe
+│   ├── preflight()    # verifica SSH + GH_TOKEN + KIRO_API_KEY (fail-fast agregado)
+│   └── [clone, generate_context, queue cleanup]
+├── board.connect()
+├── board.check_access()
+├── board_full_sync()
+└── while running: ...
+```
+
+### Log esperado (happy path)
+
+```
+[Config]    Validando pipe.yml
+[Config]    pipe.yml válido
+[Startup]   Verificando repositórios
+[Preflight] Verificando credenciais das dependências externas...
+[Preflight] ✓ SSH       chave carregada de <caminho> → ~/.ssh/id_pipe
+[Preflight] ✓ GitHub    gh autenticado como @<user> (via GH_TOKEN)
+[Preflight] ✓ kiro-cli  método ativo: API key (via KIRO_API_KEY)
+[Preflight] 3/3 credenciais OK — modo headless pronto
+[Startup]   Clonando main
+```
+
+### Referências
+
+- `src/core/preflight.py` (a implementar — US-02 #34)
+- `src/__main__.py` — `startup()` (integração — US-02 #35)
+- `doc/arch/rodar-no-docker/us-02-autenticacao-headless.md`
+- `doc/arch/rodar-no-docker/decisions/adr-04-preflight-credenciais.md`
+- `doc/stories/rodar-no-docker/ux/terminal-prototypes.md`
+- `doc/stories/rodar-no-docker/ux/error-copy-spec.md`
 
 ## Pendências
 
