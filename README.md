@@ -486,9 +486,9 @@ custo de API) provocaria falso-positivo em toda listagem, escalando throttle e
 penalty indevidamente.
 
 ### Throttle
-- Sleep antes de cada chamada (inicia em 16s)
-- Dobra ao receber secondary rate limit (até 64s)
-- Regride após 1h sem problemas
+- Sleep antes de cada chamada (em segundos; escala `0, 1, 2, 4, ... 64`)
+- Ao receber secondary rate limit, dobra (até 64s); se estiver em `0`, sobe para `1`
+- Regride após 1h sem problemas: divide por 2; ao chegar em `1`, cai para `0` (sem espera)
 
 ### Penalty
 - Ativado quando throttle atinge 64s e ainda falha

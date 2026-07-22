@@ -177,6 +177,14 @@ dentro de `_handle_rate_limit`, que já roda dentro de `_gh`/`_gql` — causaria
 recursão). As demais chamadas `subprocess.run` ficam dentro de `_gh`/`_gql`,
 sempre após `_throttle()`.
 
+Escala do valor (segundos): `0, 1, 2, 4, ... 64`.
+- **Aumento** (`_throttle_hit`, secondary rate limit): dobra até o teto `64`;
+  se estiver em `0`, sobe para `1`. Em `64` e ainda falhando → `penalty`.
+- **Redução** (`_throttle`, cooldown de 1h sem problemas): divide por 2; ao
+  chegar em `1`, cai para `0` (sem espera). Em `0` permanece `0`.
+- `_load_throttle` só restaura o valor persistido quando ele é **maior** que o
+  atual (não rebaixa após reinício).
+
 ### Detecção de rate limit por transporte (não pelo corpo)
 
 `_handle_rate_limit` decide **exclusivamente** por sinais de transporte:
