@@ -1,0 +1,72 @@
+# Protótipo — docker-compose.yml (US-04 D-05)
+#
+# Este arquivo é um MODELO ANOTADO para implementação.
+# Não usar diretamente — copiar e adaptar ao docker-compose.yml da raiz.
+#
+# Decisões de design documentadas em:
+#   doc/stories/rodar-no-docker/arquitetura.md §4 (ADR-04, D-05)
+#
+# Uso normal (persistente — default):
+#   docker compose up
+#
+# Uso efêmero (CI, testes):
+#   docker compose -f docker-compose.yml -f compose.ephemeral.yml up
+
+services:
+  pipe:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pipe:latest
+    container_name: pipe
+
+    # ─── Variáveis de ambiente ────────────────────────────────────────────────
+    environment:
+      # Caminho INTERNO da chave SSH — determinado pelo compose, não pelo .env
+      # (ADR-03: path fixo no container, independente do caminho no host)
+      PIPE_SSH_KEY_FILE: /root/.ssh/id_ed25519
+
+      # Token GitHub — lido do .env (nunca hardcoded aqui)
+      GH_TOKEN: ${GH_TOKEN}
+
+      # Desabilita cor nos logs do kiro-cli (facilita parsing)
+      KIRO_LOG_NO_COLOR: "1"
+
+      # Fuso horário
+      TZ: America/Sao_Paulo
+
+    # ─── Volumes ──────────────────────────────────────────────────────────────
+    volumes:
+      # ── Estado de runtime (D-05) ──────────────────────────────────────────
+      # Bind mounts para diretórios NO HOST — auditáveis, copiáveis, sem risco
+      # de perda acidental com `docker compose down -v` (ADR-04).
+      #
+      # Defaults inline: funciona sem .env (modo persistente por default — H-2).
+      # Para modo efêmero: usar compose.ephemeral.yml em vez de remover estas linhas.
+
+      # .pipe/ — snapshots de boards, sessões de agente, throttle.
+      # Remover = re-sync completo + perde continuidade de raciocínio. [persistir]
+      - ${PIPE_STATE_DIR:-./.pipe}:/app/.pipe
+
+      # repo/ — clones git dos repositórios configurados.
+      # Remover = re-clone de todos os repositórios a cada subida. [persistir]
+      - ${PIPE_REPO_DIR:-./repo}:/app/repo
+
+      # logs/ — logs diários (JSON) e de execução de agentes (MD).
+      # Remover = perde histórico; operação segue normal. [conveniência]
+      - ${PIPE_LOGS_DIR:-./logs}:/app/logs
+
+      # ── Configuração (read-only) ───────────────────────────────────────────
+      # Trocar estes arquivos no host + `docker compose up -d` = nova config
+      # sem rebuild (US-03).
+
+      - ./pipe.yml:/app/pipe.yml:ro
+      - ./contexts:/app/contexts
+
+      # ── Credenciais (read-only) ────────────────────────────────────────────
+      - ${SSH_KEY_FILE:-~/.ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
+      - ${SSH_KEY_FILE:-~/.ssh/id_ed25519}.pub:/root/.ssh/id_ed25519.pub:ro
+      - ${GH_CONFIG_DIR:-~/.config/gh}:/root/.config/gh:ro
+
+    # ─── Restart ──────────────────────────────────────────────────────────────
+    restart: unless-stopped
