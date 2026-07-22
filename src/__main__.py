@@ -1,5 +1,6 @@
 from src.core.log import log
 from src.core.config import check_config as validate_config, ConfigError, SSH_KEY_ENV
+from src.core.preflight import preflight
 from src.core.board import Board, PenaltyException, BoardAccessError
 from src.core.snapshot import Snapshot
 from src.core.change_queue import ChangeQueue, QUEUE_FILE
@@ -59,6 +60,7 @@ def _setup_ssh():
 def startup(config: dict):
     log.info("Startup", "Verificando repositórios")
     _setup_ssh()
+    preflight()
     REPO_DIR.mkdir(exist_ok=True)
 
     # Gerar CONTEXT.md para instruir agentes sobre regras e estrutura do sistema
