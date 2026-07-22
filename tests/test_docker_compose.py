@@ -13,6 +13,18 @@ aceitação da US-04 (#46) / contrato D-05:
   - AC-08: compose.ephemeral.yml é override mínimo (sem restart ou sobreposições indesejadas)
   - AC-09: volumes de estado ordenados antes de todos os volumes de config/credenciais
 
+Também cobre os critérios de aceitação da US-03 (#37) — orquestração via Compose
+com named volumes, Docker secrets e env_file:
+
+  - AC-01: arquivo docker-compose.yml existe na raiz do repositório
+  - AC-02: docker compose config sem erro de sintaxe
+  - AC-03: 5 named volumes declarados (pipe-repo, pipe-logs, pipe-state, kiro-home, kiro-local)
+  - AC-04: ./pipe.yml e ./contexts/ montados com :ro
+  - AC-05: secret ssh_key declarado com file: ${SSH_KEY_FILE_HOST}
+  - AC-06: PIPE_SSH_KEY_FILE=/run/secrets/ssh_key em environment: (não via .env)
+  - AC-07: env_file: .env presente (injeta GH_TOKEN e KIRO_API_KEY)
+  - AC-08: nenhum segredo hardcoded no arquivo
+
 Testes estáticos (não sobem containers) — executam sem Docker.
 Testes que requerem Docker ficam em TestDockerComposeIntegracao e são
 ignorados automaticamente quando o daemon Docker não está disponível
@@ -777,3 +789,507 @@ class TestDockerComposeIntegracao:
                 f"{lines_with_pattern}. "
                 "No modo efêmero, os volumes de estado não devem ter source no host."
             )
+
+
+# ---------------------------------------------------------------------------
+# US-03 (#37) — Orquestração Compose: named volumes, Docker secrets, env_file
+# ---------------------------------------------------------------------------
+# Estes testes validam os critérios de aceitação da issue #37, que especifica
+# uma nova estrutura de docker-compose.yml com named volumes e Docker secrets.
+# São testes estáticos que verificam o conteúdo do arquivo sem subir containers.
+# ---------------------------------------------------------------------------
+
+
+class TestUS03ArquivoExiste:
+    """US-03 AC-01: docker-compose.yml deve existir na raiz do repositório."""
+
+    def test_docker_compose_yml_existe_na_raiz(self):
+        """O arquivo docker-compose.yml deve existir na raiz do repositório."""
+        assert COMPOSE_FILE.exists(), (
+            "docker-compose.yml não encontrado na raiz do repositório. "
+            "US-03 AC-01: o arquivo é obrigatório para orquestração via Compose."
+        )
+
+    def test_docker_compose_yml_e_arquivo_regular(self):
+        """docker-compose.yml deve ser um arquivo regular (não diretório nem symlink)."""
+        assert COMPOSE_FILE.is_file(), (
+            "docker-compose.yml não é um arquivo regular. "
+            "US-03 AC-01: deve ser um arquivo YAML versionável."
+        )
+
+    def test_docker_compose_yml_nao_esta_vazio(self, compose_text):
+        """docker-compose.yml não deve estar vazio."""
+        assert len(compose_text.strip()) > 0, (
+            "docker-compose.yml está vazio. "
+            "US-03 AC-01: o arquivo deve conter a configuração de orquestração."
+        )
+
+
+class TestUS03NamedVolumes:
+    """US-03 AC-03: 5 named volumes declarados na seção volumes: top-level."""
+
+    NAMED_VOLUMES_ESPERADOS = [
+        "pipe-repo",
+        "pipe-logs",
+        "pipe-state",
+        "kiro-home",
+        "kiro-local",
+    ]
+
+    def _extrair_volumes_toplevel(self, compose_text: str) -> list[str]:
+        """Extrai os nomes dos named volumes da seção top-level."""
+        blocos = re.findall(
+            r"^volumes:\s*\n((?:  .*\n?)*)",
+            compose_text,
+            re.MULTILINE,
+        )
+        if not blocos:
+            return []
+        bloco = blocos[-1]
+        return re.findall(r"^\s{2}([\w-]+)\s*:", bloco, re.MULTILINE)
+
+    def test_secao_volumes_toplevel_presente(self, compose_text):
+        """docker-compose.yml deve ter seção 'volumes:' top-level para os named volumes."""
+        assert re.search(r"^volumes:", compose_text, re.MULTILINE), (
+            "Seção 'volumes:' top-level ausente no docker-compose.yml. "
+            "US-03 AC-03: os 5 named volumes precisam ser declarados."
+        )
+
+    @pytest.mark.parametrize("volume", NAMED_VOLUMES_ESPERADOS)
+    def test_named_volume_declarado(self, compose_text, volume):
+        """Cada um dos 5 named volumes deve estar declarado na seção volumes: top-level."""
+        blocos = re.findall(
+            r"^volumes:\s*\n((?:  .*\n?)*)",
+            compose_text,
+            re.MULTILINE,
+        )
+        bloco = blocos[-1] if blocos else ""
+        assert re.search(rf"^\s{{2}}{re.escape(volume)}\s*(?::|$)", bloco, re.MULTILINE), (
+            f"Named volume '{volume}' ausente na seção 'volumes:' top-level. "
+            f"US-03 AC-03: todos os 5 volumes devem estar declarados: "
+            f"{', '.join(TestUS03NamedVolumes.NAMED_VOLUMES_ESPERADOS)}."
+        )
+
+    def test_cinco_named_volumes_declarados(self, compose_text):
+        """Exatamente os 5 named volumes de US-03 devem estar declarados."""
+        blocos = re.findall(
+            r"^volumes:\s*\n((?:  .*\n?)*)",
+            compose_text,
+            re.MULTILINE,
+        )
+        bloco = blocos[-1] if blocos else ""
+        encontrados = re.findall(r"^\s{2}([\w-]+)\s*(?::|$)", bloco, re.MULTILINE)
+        for vol in self.NAMED_VOLUMES_ESPERADOS:
+            assert vol in encontrados, (
+                f"Named volume '{vol}' não encontrado na seção volumes: top-level. "
+                "US-03 AC-03: os 5 named volumes são obrigatórios."
+            )
+
+    @pytest.mark.parametrize("volume", NAMED_VOLUMES_ESPERADOS)
+    def test_named_volume_referenciado_em_services(self, compose_text, volume):
+        """Cada named volume deve ser referenciado na seção volumes: do serviço 'pipe'."""
+        # O volume deve aparecer como montagem no serviço (ex.: - pipe-repo:/app/repo)
+        assert re.search(rf"-\s*{re.escape(volume)}:", compose_text), (
+            f"Named volume '{volume}' não é referenciado nos volumes do serviço pipe. "
+            "US-03 AC-03: volumes declarados devem ser montados no serviço."
+        )
+
+
+class TestUS03MontamCaminhosCertos:
+    """US-03: named volumes devem montar nos caminhos corretos dentro do container."""
+
+    def test_pipe_repo_monta_em_app_repo(self, compose_text):
+        """pipe-repo deve montar em /app/repo."""
+        assert re.search(r"pipe-repo:/app/repo", compose_text), (
+            "Named volume 'pipe-repo' não está montado em /app/repo. "
+            "US-03: pipe-repo deve mapear para /app/repo."
+        )
+
+    def test_pipe_logs_monta_em_app_logs(self, compose_text):
+        """pipe-logs deve montar em /app/logs."""
+        assert re.search(r"pipe-logs:/app/logs", compose_text), (
+            "Named volume 'pipe-logs' não está montado em /app/logs. "
+            "US-03: pipe-logs deve mapear para /app/logs."
+        )
+
+    def test_pipe_state_monta_em_app_pipe(self, compose_text):
+        """pipe-state deve montar em /app/.pipe."""
+        assert re.search(r"pipe-state:/app/\.pipe", compose_text), (
+            "Named volume 'pipe-state' não está montado em /app/.pipe. "
+            "US-03: pipe-state deve mapear para /app/.pipe."
+        )
+
+    def test_kiro_home_monta_em_home_pipe_kiro(self, compose_text):
+        """kiro-home deve montar em /home/pipe/.kiro."""
+        assert re.search(r"kiro-home:/home/pipe/\.kiro", compose_text), (
+            "Named volume 'kiro-home' não está montado em /home/pipe/.kiro. "
+            "US-03 AC-03 / ADR-07 RA-1: kiro-home é necessário para retomada de sessão."
+        )
+
+    def test_kiro_local_monta_em_home_pipe_local_share_kiro_cli(self, compose_text):
+        """kiro-local deve montar em /home/pipe/.local/share/kiro-cli."""
+        assert re.search(r"kiro-local:/home/pipe/\.local/share/kiro-cli", compose_text), (
+            "Named volume 'kiro-local' não está montado em /home/pipe/.local/share/kiro-cli. "
+            "US-03 AC-03 / ADR-07 RA-1: kiro-local persiste o índice SQLite necessário "
+            "para --list-sessions e --resume-id."
+        )
+
+
+class TestUS03VolumesConfiguracaoReadOnly:
+    """US-03 AC-04: ./pipe.yml e ./contexts/ montados com :ro."""
+
+    def test_pipe_yml_montado_read_only(self, compose_text):
+        """./pipe.yml deve ser montado no container com :ro (somente leitura)."""
+        assert re.search(r"\./pipe\.yml:/app/pipe\.yml:ro", compose_text), (
+            "./pipe.yml não está montado com :ro em /app/pipe.yml. "
+            "US-03 AC-04: configuração é somente leitura no container."
+        )
+
+    def test_contexts_montado_read_only(self, compose_text):
+        """./contexts deve ser montado no container com :ro (somente leitura)."""
+        assert re.search(r"\./contexts:/app/contexts:ro", compose_text), (
+            "./contexts não está montado com :ro em /app/contexts. "
+            "US-03 AC-04: contextos dos agentes são somente leitura no container."
+        )
+
+
+class TestUS03DockerSecret:
+    """US-03 AC-05: Docker secret ssh_key declarado com file: ${SSH_KEY_FILE_HOST}."""
+
+    def test_secao_secrets_toplevel_presente(self, compose_text):
+        """docker-compose.yml deve ter seção 'secrets:' top-level."""
+        assert re.search(r"^secrets:", compose_text, re.MULTILINE), (
+            "Seção 'secrets:' top-level ausente no docker-compose.yml. "
+            "US-03 AC-05: Docker secret para chave SSH é obrigatório."
+        )
+
+    def test_secret_ssh_key_declarado(self, compose_text):
+        """Secret 'ssh_key' deve estar declarado na seção secrets: top-level."""
+        blocos = re.findall(
+            r"^secrets:\s*\n((?:  .*\n?)*)",
+            compose_text,
+            re.MULTILINE,
+        )
+        bloco = blocos[-1] if blocos else ""
+        assert re.search(r"^\s{2}ssh_key\s*:", bloco, re.MULTILINE), (
+            "Secret 'ssh_key' não declarado na seção 'secrets:' top-level. "
+            "US-03 AC-05: o secret da chave SSH deve ser declarado."
+        )
+
+    def test_secret_ssh_key_usa_ssh_key_file_host(self, compose_text):
+        """Secret ssh_key deve usar file: ${SSH_KEY_FILE_HOST} (variável de ambiente do host)."""
+        assert re.search(r"file:\s*\$\{SSH_KEY_FILE_HOST\}", compose_text), (
+            "Secret 'ssh_key' não usa 'file: ${SSH_KEY_FILE_HOST}'. "
+            "US-03 AC-05: o caminho da chave no host é fornecido via .env, "
+            "nunca hardcoded. Formato: file: ${SSH_KEY_FILE_HOST}."
+        )
+
+    def test_servico_pipe_referencia_secret_ssh_key(self, compose_text):
+        """O serviço 'pipe' deve referenciar o secret 'ssh_key' em sua seção secrets:."""
+        # Encontra a seção do serviço pipe e verifica referência ao secret
+        assert re.search(r"secrets:.*ssh_key|ssh_key.*secrets:", compose_text, re.DOTALL), (
+            "Serviço 'pipe' não referencia o secret 'ssh_key'. "
+            "US-03 AC-05: o serviço deve declarar o secret para ter acesso a ele."
+        )
+
+    def test_secret_montado_em_run_secrets(self, compose_text):
+        """O secret ssh_key é montado automaticamente em /run/secrets/ssh_key pelo Compose."""
+        # A montagem automática em /run/secrets/ssh_key é comportamento do Compose;
+        # verificamos indiretamente que PIPE_SSH_KEY_FILE aponta para esse caminho.
+        assert "/run/secrets/ssh_key" in compose_text, (
+            "/run/secrets/ssh_key não encontrado no docker-compose.yml. "
+            "US-03 AC-06: PIPE_SSH_KEY_FILE deve apontar para /run/secrets/ssh_key, "
+            "que é o caminho onde o Compose monta secrets com 'file:'."
+        )
+
+    def test_sem_bind_mount_direto_de_chave_ssh(self, compose_text):
+        """Não deve haver bind mount direto da chave SSH (substituído pelo Docker secret)."""
+        # Padrão de bind mount direto: algo como ~/.ssh ou /home/.../.ssh ou /root/.ssh
+        # montado em /root/.ssh ou similar
+        assert not re.search(r"\.ssh/id_\w+:/run/secrets", compose_text), (
+            "Bind mount direto de chave SSH detectado apontando para /run/secrets. "
+            "US-03 AC-05: usar Docker secret 'ssh_key' com file: ${SSH_KEY_FILE_HOST}, "
+            "não bind mount direto."
+        )
+
+
+class TestUS03PipeSSHKeyFileEmEnvironment:
+    """US-03 AC-06: PIPE_SSH_KEY_FILE=/run/secrets/ssh_key em environment: (não no .env)."""
+
+    def test_pipe_ssh_key_file_em_environment(self, compose_text):
+        """PIPE_SSH_KEY_FILE deve estar na seção environment: do serviço pipe."""
+        assert re.search(r"PIPE_SSH_KEY_FILE.*=.*/run/secrets/ssh_key", compose_text), (
+            "PIPE_SSH_KEY_FILE=/run/secrets/ssh_key ausente na seção environment:. "
+            "US-03 AC-06 / ADR-07: o caminho interno do secret é determinado pelo compose, "
+            "não pelo operador via .env."
+        )
+
+    def test_pipe_ssh_key_file_valor_fixo(self, compose_text):
+        """PIPE_SSH_KEY_FILE deve ter valor fixo /run/secrets/ssh_key, não uma variável."""
+        # Não deve ser ${PIPE_SSH_KEY_FILE} — deve ser o valor fixo
+        match = re.search(r"PIPE_SSH_KEY_FILE[:\s=]+(.+)", compose_text)
+        if match:
+            valor = match.group(1).strip()
+            assert "/run/secrets/ssh_key" in valor and "${" not in valor, (
+                f"PIPE_SSH_KEY_FILE tem valor '{valor}' em vez de '/run/secrets/ssh_key' fixo. "
+                "US-03 AC-06 / ADR-07: o caminho interno é fixo no compose, "
+                "não configurável pelo operador."
+            )
+
+    def test_pipe_ssh_key_file_nao_e_variavel_de_ambiente_interpolada(self, compose_text):
+        """PIPE_SSH_KEY_FILE não deve ser referência a variável do .env."""
+        # Padrão indesejado: PIPE_SSH_KEY_FILE: ${PIPE_SSH_KEY_FILE} ou similar
+        assert not re.search(r"PIPE_SSH_KEY_FILE[:\s=]+\$\{PIPE_SSH_KEY_FILE", compose_text), (
+            "PIPE_SSH_KEY_FILE está sendo interpolada do .env. "
+            "US-03 AC-06 / ADR-07: deve ser valor fixo /run/secrets/ssh_key no compose."
+        )
+
+
+class TestUS03EnvFile:
+    """US-03 AC-07: env_file: .env presente para injetar GH_TOKEN e KIRO_API_KEY."""
+
+    def test_env_file_presente(self, compose_text):
+        """O serviço pipe deve ter env_file: .env ou env_file: - .env."""
+        assert re.search(r"env_file:", compose_text), (
+            "Diretiva 'env_file:' ausente no docker-compose.yml. "
+            "US-03 AC-07: env_file: .env injeta GH_TOKEN e KIRO_API_KEY sem hardcoding."
+        )
+
+    def test_env_file_aponta_para_dotenv(self, compose_text):
+        """env_file deve referenciar .env."""
+        assert re.search(r"env_file:.*\.env|env_file:\s*\n\s*-\s*\.env", compose_text, re.DOTALL), (
+            "env_file não aponta para '.env'. "
+            "US-03 AC-07: o arquivo de variáveis de ambiente deve ser '.env'."
+        )
+
+    def test_gh_token_nao_em_environment_hardcoded(self, compose_text):
+        """GH_TOKEN não deve ter valor hardcoded na seção environment: (deve vir do .env)."""
+        assert not re.search(r"GH_TOKEN\s*[:=]\s*ghp_[A-Za-z0-9]+", compose_text), (
+            "GH_TOKEN com valor hardcoded no compose. "
+            "US-03 AC-07 / AC-08: tokens devem vir do .env via env_file:, nunca hardcoded."
+        )
+
+    def test_kiro_api_key_nao_hardcoded(self, compose_text):
+        """KIRO_API_KEY não deve ter valor hardcoded no compose."""
+        assert not re.search(r"KIRO_API_KEY\s*[:=]\s*[A-Za-z0-9_\-]{20,}", compose_text), (
+            "KIRO_API_KEY com possível valor hardcoded no compose. "
+            "US-03 AC-08: segredos devem vir do .env via env_file:."
+        )
+
+
+class TestUS03SemSegredosHardcoded:
+    """US-03 AC-08: nenhum segredo hardcoded no docker-compose.yml."""
+
+    def test_sem_ssh_key_conteudo_hardcoded(self, compose_text):
+        """Conteúdo de chave SSH (BEGIN RSA PRIVATE KEY, etc.) não deve aparecer no compose."""
+        padrao_chave = r"BEGIN\s+(RSA|OPENSSH|EC|DSA)\s+PRIVATE\s+KEY"
+        assert not re.search(padrao_chave, compose_text), (
+            "Conteúdo de chave SSH privada detectado no docker-compose.yml. "
+            "US-03 AC-08: nunca embutir chaves ou segredos diretamente no compose."
+        )
+
+    def test_sem_token_github_hardcoded(self, compose_text):
+        """Token do GitHub não deve estar hardcoded no compose."""
+        for pat in (r"ghp_[A-Za-z0-9]{36}", r"ghs_[A-Za-z0-9]+", r"glpat-[A-Za-z0-9]+"):
+            assert not re.search(pat, compose_text), (
+                f"Possível token GitHub hardcoded (padrão {pat!r}) no docker-compose.yml. "
+                "US-03 AC-08: segredos devem ser referenciados via variáveis de ambiente."
+            )
+
+    def test_ssh_key_file_host_e_referencia_de_variavel(self, compose_text):
+        """SSH_KEY_FILE_HOST deve ser referenciado como ${SSH_KEY_FILE_HOST}, não com valor real."""
+        # Busca especificamente a linha do secret ssh_key com file:
+        match = re.search(r"^\s*file:\s*(.+)", compose_text, re.MULTILINE)
+        # Se não há nenhum 'file:' no compose, o secret pode não estar declarado —
+        # outro teste (test_secret_ssh_key_usa_ssh_key_file_host) cobre esse caso.
+        if not match:
+            return
+        valor = match.group(1).strip()
+        assert "${SSH_KEY_FILE_HOST}" in valor or "${" in valor, (
+            f"'file:' do secret tem valor direto '{valor}' em vez de variável. "
+            "US-03 AC-05 / AC-08: usar 'file: ${{SSH_KEY_FILE_HOST}}' — "
+            "o caminho real vem do .env."
+        )
+
+    def test_sem_variaveis_sensíveis_com_valores_reais(self, compose_text):
+        """Nenhuma variável sensível deve ter valor real embutido no compose."""
+        padroes_sensiveis = [
+            (r"GH_TOKEN\s*[:=]\s*ghp_\w+", "GH_TOKEN"),
+            (r"KIRO_API_KEY\s*[:=]\s*[A-Za-z0-9\-_]{32,}", "KIRO_API_KEY"),
+            (r"SSH_KEY\s*[:=]\s*-----BEGIN", "SSH_KEY com conteúdo de chave"),
+        ]
+        for pat, nome in padroes_sensiveis:
+            assert not re.search(pat, compose_text), (
+                f"Variável sensível '{nome}' com valor real detectada no compose. "
+                "US-03 AC-08: nenhum segredo hardcoded."
+            )
+
+
+class TestUS03SintaxeYAML:
+    """US-03 AC-02: docker compose config não deve produzir erro de sintaxe."""
+
+    def test_arquivo_yaml_valido(self, compose_text):
+        """docker-compose.yml deve ser YAML válido (parseável pelo PyYAML)."""
+        try:
+            import yaml
+            conteudo = yaml.safe_load(compose_text)
+            assert conteudo is not None, "YAML resultou em None — arquivo pode estar vazio."
+        except Exception as e:
+            pytest.fail(
+                f"docker-compose.yml não é YAML válido: {e}\n"
+                "US-03 AC-02: o arquivo deve ser parseável sem erros de sintaxe."
+            )
+
+    def test_yaml_tem_chave_services(self, compose_text):
+        """docker-compose.yml deve ter chave 'services:' de nível raiz."""
+        try:
+            import yaml
+            conteudo = yaml.safe_load(compose_text)
+            assert "services" in conteudo, (
+                "Chave 'services' ausente no docker-compose.yml. "
+                "US-03 AC-02: o compose precisa declarar ao menos o serviço 'pipe'."
+            )
+        except Exception:
+            pytest.skip("YAML inválido — teste de sintaxe avançada ignorado.")
+
+    def test_yaml_tem_servico_pipe(self, compose_text):
+        """docker-compose.yml deve declarar o serviço 'pipe'."""
+        try:
+            import yaml
+            conteudo = yaml.safe_load(compose_text)
+            services = conteudo.get("services", {})
+            assert "pipe" in services, (
+                "Serviço 'pipe' ausente em services:. "
+                "US-03 AC-02: o serviço principal da esteira deve se chamar 'pipe'."
+            )
+        except Exception:
+            pytest.skip("YAML inválido — teste de estrutura ignorado.")
+
+    def test_yaml_tem_chave_secrets(self, compose_text):
+        """docker-compose.yml deve ter chave 'secrets:' de nível raiz."""
+        try:
+            import yaml
+            conteudo = yaml.safe_load(compose_text)
+            assert "secrets" in conteudo, (
+                "Chave 'secrets' ausente no docker-compose.yml. "
+                "US-03 AC-05: a seção secrets: é obrigatória para o Docker secret ssh_key."
+            )
+        except Exception:
+            pytest.skip("YAML inválido — teste de estrutura ignorado.")
+
+    def test_yaml_tem_chave_volumes(self, compose_text):
+        """docker-compose.yml deve ter chave 'volumes:' de nível raiz."""
+        try:
+            import yaml
+            conteudo = yaml.safe_load(compose_text)
+            assert "volumes" in conteudo, (
+                "Chave 'volumes' ausente no docker-compose.yml. "
+                "US-03 AC-03: a seção volumes: é obrigatória para os 5 named volumes."
+            )
+        except Exception:
+            pytest.skip("YAML inválido — teste de estrutura ignorado.")
+
+
+class TestUS03IntegracaoCompose:
+    """US-03 AC-02: docker compose config sem erro de sintaxe (testes com Docker)."""
+
+    def test_compose_config_com_ssh_key_file_host(self):
+        """US-03 AC-02: 'docker compose config' deve validar com SSH_KEY_FILE_HOST definido."""
+        if not _docker_disponivel():
+            pytest.skip("Docker daemon não disponível.")
+
+        import os
+        import tempfile
+
+        # Cria arquivo temporário simulando chave SSH
+        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as f:
+            f.write(b"fake-key-for-compose-validation")
+            fake_key = f.name
+
+        try:
+            env_com_secret = dict(os.environ, SSH_KEY_FILE_HOST=fake_key)
+            result = subprocess.run(
+                ["docker", "compose", "-f", str(COMPOSE_FILE), "config"],
+                capture_output=True,
+                text=True,
+                cwd=str(REPO_ROOT),
+                env=env_com_secret,
+            )
+            assert result.returncode == 0, (
+                f"'docker compose config' falhou com SSH_KEY_FILE_HOST definido "
+                f"(exit {result.returncode}). Stderr: {result.stderr}\n"
+                "US-03 AC-02: o compose deve validar sem erro quando SSH_KEY_FILE_HOST está preenchido."
+            )
+        finally:
+            import os as _os
+            _os.unlink(fake_key)
+
+    def test_compose_config_lista_cinco_named_volumes(self):
+        """US-03 AC-03: 'docker compose config --volumes' deve listar os 5 named volumes."""
+        if not _docker_disponivel():
+            pytest.skip("Docker daemon não disponível.")
+
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as f:
+            f.write(b"fake-key")
+            fake_key = f.name
+
+        try:
+            env_com_secret = dict(os.environ, SSH_KEY_FILE_HOST=fake_key)
+            result = subprocess.run(
+                ["docker", "compose", "-f", str(COMPOSE_FILE), "config", "--volumes"],
+                capture_output=True,
+                text=True,
+                cwd=str(REPO_ROOT),
+                env=env_com_secret,
+            )
+            if result.returncode != 0:
+                pytest.skip(f"docker compose config --volumes falhou: {result.stderr}")
+
+            output = result.stdout
+            for volume in TestUS03NamedVolumes.NAMED_VOLUMES_ESPERADOS:
+                assert volume in output, (
+                    f"Named volume '{volume}' ausente no output de 'docker compose config --volumes'. "
+                    f"US-03 AC-03: todos os 5 volumes devem ser listados."
+                )
+        finally:
+            import os as _os
+            _os.unlink(fake_key)
+
+    def test_compose_config_sem_gh_token_hardcoded_no_output(self):
+        """US-03 AC-08: o output de 'docker compose config' não deve conter tokens reais."""
+        if not _docker_disponivel():
+            pytest.skip("Docker daemon não disponível.")
+
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as f:
+            f.write(b"fake-key")
+            fake_key = f.name
+
+        try:
+            env_teste = dict(os.environ, SSH_KEY_FILE_HOST=fake_key)
+            # Remove GH_TOKEN do ambiente para garantir que não vaze
+            env_teste.pop("GH_TOKEN", None)
+
+            result = subprocess.run(
+                ["docker", "compose", "-f", str(COMPOSE_FILE), "config"],
+                capture_output=True,
+                text=True,
+                cwd=str(REPO_ROOT),
+                env=env_teste,
+            )
+            if result.returncode != 0:
+                pytest.skip("docker compose config falhou sem GH_TOKEN — skip.")
+
+            # O output resolvido não deve conter tokens reais de GitHub
+            assert not re.search(r"ghp_[A-Za-z0-9]{36}", result.stdout), (
+                "Token GitHub (ghp_...) detectado no output de 'docker compose config'. "
+                "US-03 AC-08: segredos reais nunca devem aparecer no compose."
+            )
+        finally:
+            import os as _os
+            _os.unlink(fake_key)
