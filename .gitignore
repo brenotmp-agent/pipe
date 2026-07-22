@@ -17,5 +17,8 @@ pipe.yml
 # Docker — binário kiro-cli (copiado via prepare-docker.sh, não versionado)
 kiro-cli
 
+# Segredos (nunca versionar)
+.env
+
 # Código de referência (versão antiga)
 oldversion/
