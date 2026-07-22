@@ -25,7 +25,7 @@ class GitHubBoardAdapter(BoardPort):
     _penalty_cooldown: datetime = None
 
     # Throttle
-    _throttle_value: int = 16
+    _throttle_value: int = 1
     _throttle_cooldown: datetime = None
     _throttle_file: str = ".pipe/throttle"
 
