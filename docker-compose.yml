@@ -1,0 +1,65 @@
+services:
+  pipe:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pipe:latest
+    container_name: pipe
+
+    # ─── Variáveis de ambiente obrigatórias ───────────────────────────────────
+    environment:
+      # Caminho da chave SSH dentro do container (deve coincidir com o volume abaixo)
+      PIPE_SSH_KEY_FILE: /root/.ssh/id_ed25519
+
+      # Token do GitHub — preencha em .env ou exporte antes de subir
+      GH_TOKEN: ${GH_TOKEN}
+
+      # Inibe cor nos logs do kiro-cli para facilitar parsing
+      KIRO_LOG_NO_COLOR: "1"
+
+      # Fuso horário (opcional — ajuste conforme o ambiente)
+      TZ: America/Sao_Paulo
+
+    # ─── Volumes ──────────────────────────────────────────────────────────────
+    volumes:
+      # ── Estado de runtime (US-04 / D-05) ─────────────────────────────────
+      # Bind mounts para os diretórios de estado da esteira no host.
+      # Modo persistente é o default (H-2: prevenção de efêmero por engano).
+      # Comente qualquer linha abaixo para não persistir aquele diretório.
+
+      # .pipe/ → snapshots de boards, sessões de agente, throttle.
+      # Se remover: re-sync completo no arranque + perde a continuidade de
+      # raciocínio dos agentes (retomam do zero). [recomendado persistir]
+      - ${PIPE_STATE_DIR:-./.pipe}:/app/.pipe
+
+      # repo/ → clones git dos repositórios configurados.
+      # Se remover: re-clone de todos os repositórios a cada subida. [recomendado persistir]
+      - ${PIPE_REPO_DIR:-./repo}:/app/repo
+
+      # logs/ → logs diários (JSON) e logs de execução dos agentes (MD).
+      # Se remover: perde histórico de execução. Operação segue normal. [conveniência]
+      - ${PIPE_LOGS_DIR:-./logs}:/app/logs
+
+      # ── Configuração e credenciais ────────────────────────────────────────
+
+      # Configuração da esteira (obrigatório — ajuste o caminho do host)
+      - ./pipe.yml:/app/pipe.yml:ro
+
+      # Contextos dos agentes (obrigatório — criado automaticamente se vazio)
+      - ./contexts:/app/contexts
+
+      # Chave SSH do host (somente leitura)
+      - ${SSH_KEY_FILE:-~/.ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
+      - ${SSH_KEY_FILE:-~/.ssh/id_ed25519}.pub:/root/.ssh/id_ed25519.pub:ro
+
+      # Configuração do gh CLI (autenticação — gerada por `gh auth login`)
+      - ${GH_CONFIG_DIR:-~/.config/gh}:/root/.config/gh:ro
+
+    # ─── Restart ──────────────────────────────────────────────────────────────
+    restart: unless-stopped
+
+    # ─── Recursos (opcional — ajuste conforme o ambiente) ─────────────────────
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 512m
