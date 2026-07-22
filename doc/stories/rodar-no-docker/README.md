@@ -11,6 +11,7 @@ fases da esteira.
 | Requisitos | [`requisitos-decisoes.md`](./requisitos-decisoes.md) | RF-06, D-04 e ADR-04. |
 | UX | [`ux/README.md`](./ux/README.md) | Persona, jornadas, heurísticas, protótipos. |
 | **Arquitetura** | [**`arquitetura.md`**](./arquitetura.md) | **Arquitetura de persistência (US-04): contrato de volumes, ciclo de vida do estado, ADR-05, ADR-06.** |
+| Change File | [`change-file.md`](./change-file.md) | Registro de todas as alterações entregues na story #19. |
 
 ## US-04 — Persistir estado de runtime entre reinícios
 
