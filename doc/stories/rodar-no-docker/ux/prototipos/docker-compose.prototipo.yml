@@ -1,0 +1,46 @@
+# ⚠️ PROTÓTIPO DE UX — NÃO É O ARTEFATO FINAL DE DEPLOY
+#
+# Mockup anotado do docker-compose para US-04 (persistência de estado).
+# Objetivo: demonstrar a EXPERIÊNCIA pretendida para o operador, não a
+# implementação final (Dockerfile, build, segredos das US-01..03 ficam a cargo
+# da engenharia). Nomes com sufixo .prototipo evitam confusão com o compose real.
+#
+# Decisão de UX central: MODO PERSISTENTE É O DEFAULT (achado H-2, prevenção de
+# erro). Para rodar efêmero, use o override:
+#     docker compose -f docker-compose.yml -f compose.ephemeral.prototipo.yml up
+#
+# Os caminhos vêm do .env (ver .env.prototipo) para o operador não editar YAML.
+
+services:
+  esteira:
+    # (engenharia US-01) build/imagem da esteira entram aqui
+    build: .
+    # (engenharia US-03) segredos: PIPE_SSH_KEY_FILE, GH_TOKEN, ~/.kiro etc.
+
+    volumes:
+      # ─────────────────────────────────────────────────────────────────────
+      # ESTADO DE RUNTIME — MODO PERSISTENTE (default)
+      # Comente qualquer linha abaixo para NÃO persistir aquele diretório.
+      # A frase em cada linha é "o que você perde ao remover este bind".
+      # ─────────────────────────────────────────────────────────────────────
+
+      # .pipe/ → snapshots, sessões de agente, throttle.
+      # Se remover: re-sync completo no arranque + perde a CONTINUIDADE de
+      # raciocínio dos agentes (retomam do zero). [recomendado persistir]
+      - ${PIPE_STATE_DIR:-./.pipe}:/app/.pipe
+
+      # repo/ → clones git dos repositórios configurados.
+      # Se remover: re-clone de TODOS os repositórios a cada subida.
+      # [recomendado persistir]
+      - ${PIPE_REPO_DIR:-./repo}:/app/repo
+
+      # logs/ → logs diários (JSON) e logs de execução dos agentes (MD).
+      # Se remover: perde histórico de execução. Operação segue normal.
+      # [conveniência — pode ficar efêmero sem impacto operacional]
+      - ${PIPE_LOGS_DIR:-./logs}:/app/logs
+
+      # Config/segredos (US-02/US-03) — read-only, não é "estado de runtime":
+      # - ${PIPE_CONFIG_FILE:-./pipe.yml}:/app/pipe.yml:ro
+      # - ${PIPE_CONTEXTS_DIR:-./contexts}:/app/contexts:ro
+
+    restart: unless-stopped
