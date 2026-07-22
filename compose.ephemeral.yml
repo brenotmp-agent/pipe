@@ -1,0 +1,13 @@
+# compose.ephemeral.yml — override para modo EFÊMERO (sem persistência de estado)
+#
+# Uso: docker compose -f docker-compose.yml -f compose.ephemeral.yml up
+#
+# Sobrescreve os bind mounts de estado por volumes anônimos descartados no `down`.
+# Útil em CI ou quando se quer garantir estado zerado a cada subida.
+
+services:
+  pipe:
+    volumes:
+      - /app/.pipe   # anônimo — descartado no docker compose down
+      - /app/repo    # anônimo — descartado no docker compose down
+      - /app/logs    # anônimo — descartado no docker compose down
