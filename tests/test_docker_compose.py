@@ -684,15 +684,17 @@ class TestDockerComposeIntegracao:
             "US-04 AC-05: o override efêmero deve ser aceito pelo Compose."
         )
 
-    def test_ac01_persistencia_estado_entre_down_e_up(self, tmp_path):
-        """US-04 AC-01: arquivos criados em .pipe/ persistem após docker compose down && up.
+    def test_ac01_config_resolve_paths_de_estado_customizados(self, tmp_path):
+        """US-04 AC-01 (configuração): 'docker compose config' resolve variáveis de estado customizadas.
 
-        Sobe o container com bind mounts em diretórios temporários, cria um arquivo
-        marcador em /app/.pipe, executa down e verifica que o arquivo ainda existe no host
-        (persistência garantida pelo bind mount).
+        Valida que ao definir PIPE_STATE_DIR, PIPE_REPO_DIR e PIPE_LOGS_DIR com
+        caminhos customizados, o Compose aceita a configuração sem erros e expande
+        corretamente as variáveis no config resolvido.
 
-        Este teste valida a garantia central da US-04: o estado de runtime sobrevive
-        a reinicios do container quando bind mounts estão configurados.
+        Nota: este teste valida a configuração de bind mounts (pré-condição do AC-01),
+        não o ciclo runtime de down/up com container em execução. A garantia de
+        persistência real (AC-01 completo) requer build da imagem e é verificada
+        manualmente conforme documentado em doc/stories/rodar-no-docker/arquitetura.md §8.
         """
         import os
 
@@ -712,25 +714,8 @@ class TestDockerComposeIntegracao:
             "GH_CONFIG_DIR": str(Path.home() / ".config" / "gh"),
         })
 
-        # Cria arquivo marcador diretamente no diretório de estado do host
-        # (simula o que o container gravaria em /app/.pipe)
-        marcador = state_dir / "ac01_persistencia.test"
-        marcador.write_text("marcador de persistência US-04 AC-01", encoding="utf-8")
-
-        # Verifica que o arquivo marcador existe no host
-        assert marcador.exists(), (
-            "Falha no setup do teste: arquivo marcador não criado no host."
-        )
-
-        # Simula o bind mount: o arquivo deve continuar no host independentemente
-        # do ciclo de vida do container (este é o contrato do bind mount)
-        assert marcador.read_text(encoding="utf-8") == "marcador de persistência US-04 AC-01", (
-            "US-04 AC-01: bind mount não preservou o conteúdo do arquivo no host. "
-            "O estado de runtime deve sobreviver ao ciclo down/up do container."
-        )
-
-        # Verifica também que `docker compose config` resolve os paths corretamente
-        # com as variáveis de estado apontando para os diretórios temporários
+        # Verifica que `docker compose config` resolve os paths corretamente
+        # com as variáveis de estado apontando para os diretórios customizados
         result = subprocess.run(
             ["docker", "compose", "-f", str(COMPOSE_FILE), "config"],
             capture_output=True,
@@ -747,15 +732,17 @@ class TestDockerComposeIntegracao:
         output = result.stdout
         assert str(state_dir) in output, (
             f"Diretório de estado customizado ({state_dir}) não aparece no config resolvido. "
-            "PIPE_STATE_DIR não está sendo expandido corretamente."
+            "PIPE_STATE_DIR não está sendo expandido corretamente pelo Compose."
         )
 
     def test_ac01_estado_efemero_nao_persiste_no_host(self, tmp_path):
-        """US-04 AC-01 (efêmero): com compose.ephemeral.yml, diretórios de estado não
-        aparecem no host após uso — volumes anônimos ficam no daemon Docker, não no host.
+        """US-04 AC-01 (efêmero — validação estática): o config do compose efêmero não
+        declara 'source:' de host para os diretórios de estado.
 
-        Valida que o config do compose efêmero não referencia nenhum path do host
-        para os diretórios de estado, garantindo o comportamento descartável.
+        Este teste valida a configuração: confirma que os volumes anônimos do override
+        efêmero não têm bind mount de host nos dirs de estado (.pipe, repo, logs).
+        Não é um teste de runtime (não sobe container nem executa down) — verifica
+        que a estrutura do compose impede a persistência acidental no host.
         """
         import os
 
