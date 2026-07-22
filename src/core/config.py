@@ -23,11 +23,19 @@ def _validate_env():
     key_path = os.environ.get(SSH_KEY_ENV, "").strip()
     if not key_path:
         raise ConfigError(
-            f"Variável de ambiente '{SSH_KEY_ENV}' não definida ou vazia. "
-            f"Defina com: export {SSH_KEY_ENV}=~/.ssh/id_ed25519"
+            "✗ SSH  variável PIPE_SSH_KEY_FILE não definida ou vazia\n"
+            "    Causa:  o clone via SSH no arranque precisa saber onde está a chave privada.\n"
+            "    Ação:   defina PIPE_SSH_KEY_FILE no serviço apontando para o secret montado.\n"
+            "            ex.: PIPE_SSH_KEY_FILE=/run/secrets/ssh_key\n"
+            "    Onde:   monte a chave como Docker secret (ver docker-compose / runbook)."
         )
     if not Path(key_path).expanduser().exists():
-        raise ConfigError(f"Arquivo SSH não encontrado: {key_path}")
+        raise ConfigError(
+            f"✗ SSH  arquivo de chave não encontrado em {key_path}\n"
+            "    Causa:  PIPE_SSH_KEY_FILE aponta para um caminho que não existe no container.\n"
+            "    Ação:   confira se o secret/volume da chave está montado nesse caminho.\n"
+            "    Onde:   seção 'secrets' do docker-compose (ver runbook)."
+        )
 
 
 def _validate_git(git: dict):

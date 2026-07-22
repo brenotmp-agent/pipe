@@ -141,11 +141,12 @@ class TestFailFastCheckConfig:
     # ── Teste 4 ───────────────────────────────────────────────────────────────
 
     def test_error_message_is_actionable(self, tmp_path, monkeypatch, capsys):
-        """Mensagem de fail-fast deve ser clara e acionável (não um traceback silencioso).
+        """Mensagem de fail-fast (M-01) deve ser Docker-aware e acionável.
 
-        Verifica que a saída de terminal contém o nome da variável de ambiente
-        faltante e uma instrução de como corrigi-la, conforme definido em
-        _validate_env() → ConfigError.
+        Verifica que a saída de terminal contém o símbolo canônico '✗ SSH',
+        o nome da variável faltante e a instrução Docker correta (sem sugerir
+        'export' no host), conforme catálogo de copy M-01 aprovado em
+        doc/stories/rodar-no-docker/ux/error-copy-spec.md.
         """
         monkeypatch.chdir(tmp_path)
         monkeypatch.delenv("PIPE_SSH_KEY_FILE", raising=False)
@@ -163,9 +164,112 @@ class TestFailFastCheckConfig:
             f"Mensagem não menciona a variável faltante. Saída: {output!r}"
         )
 
-        # A mensagem deve conter instrução de como corrigir (export ...)
-        assert "export" in output.lower(), (
-            f"Mensagem não contém instrução de correção. Saída: {output!r}"
+        # A mensagem deve conter o símbolo canônico de erro SSH (M-01)
+        assert "✗ SSH" in output, (
+            f"Mensagem não contém o símbolo '✗ SSH'. Saída: {output!r}"
+        )
+
+        # A mensagem deve orientar para contexto Docker (secret montado)
+        assert "secret" in output.lower(), (
+            f"Mensagem não menciona configuração de secret Docker. Saída: {output!r}"
+        )
+
+        # A mensagem NÃO deve sugerir export no host — inadequado para containers
+        assert "export PIPE_SSH_KEY_FILE" not in output, (
+            f"Mensagem ainda contém 'export PIPE_SSH_KEY_FILE' (linguagem de host, não Docker). "
+            f"Saída: {output!r}"
+        )
+
+    # ── Teste 4b ──────────────────────────────────────────────────────────────
+
+    def test_missing_key_file_message_is_docker_aware(self, tmp_path, monkeypatch, capsys):
+        """Mensagem M-02 (arquivo não encontrado) deve ser Docker-aware.
+
+        Verifica que a saída contém o símbolo '✗ SSH', o caminho interpolado
+        e orientação sobre secret/volume Docker — sem referência a host.
+        """
+        monkeypatch.chdir(tmp_path)
+        nonexistent = tmp_path / "chave_que_nao_existe"
+        monkeypatch.setenv("PIPE_SSH_KEY_FILE", str(nonexistent))
+        (tmp_path / "pipe.yml").write_text(_MINIMAL_PIPE_YML)
+
+        from src.__main__ import check_config
+        with pytest.raises(SystemExit):
+            check_config()
+
+        captured = capsys.readouterr()
+        output = captured.out
+
+        # A mensagem deve conter o símbolo canônico de erro SSH (M-02)
+        assert "✗ SSH" in output, (
+            f"Mensagem M-02 não contém o símbolo '✗ SSH'. Saída: {output!r}"
+        )
+
+        # O caminho deve aparecer na mensagem
+        assert str(nonexistent) in output, (
+            f"Mensagem M-02 não interpolou o caminho da chave. Saída: {output!r}"
+        )
+
+        # Deve orientar para secret/volume Docker
+        assert "secret" in output.lower() or "volume" in output.lower(), (
+            f"Mensagem M-02 não menciona secret/volume Docker. Saída: {output!r}"
+        )
+
+    # ── Teste 4c ──────────────────────────────────────────────────────────────
+
+    def test_m01_message_structure_has_causa_acao_onde(self, tmp_path, monkeypatch, capsys):
+        """Mensagem M-01 deve seguir estrutura completa: Causa / Ação / Onde.
+
+        A estrutura padronizada facilita triagem operacional em ambiente Docker.
+        """
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("PIPE_SSH_KEY_FILE", raising=False)
+        (tmp_path / "pipe.yml").write_text(_MINIMAL_PIPE_YML)
+
+        from src.__main__ import check_config
+        with pytest.raises(SystemExit):
+            check_config()
+
+        captured = capsys.readouterr()
+        output = captured.out
+
+        assert "Causa:" in output, (
+            f"Mensagem M-01 não contém campo 'Causa:'. Saída: {output!r}"
+        )
+        assert "Ação:" in output, (
+            f"Mensagem M-01 não contém campo 'Ação:'. Saída: {output!r}"
+        )
+        assert "Onde:" in output, (
+            f"Mensagem M-01 não contém campo 'Onde:'. Saída: {output!r}"
+        )
+
+    # ── Teste 4d ──────────────────────────────────────────────────────────────
+
+    def test_m02_message_structure_has_causa_acao_onde(self, tmp_path, monkeypatch, capsys):
+        """Mensagem M-02 deve seguir estrutura completa: Causa / Ação / Onde.
+
+        Mesmo padrão de M-01 para consistência de triagem operacional.
+        """
+        monkeypatch.chdir(tmp_path)
+        nonexistent = tmp_path / "chave_ausente"
+        monkeypatch.setenv("PIPE_SSH_KEY_FILE", str(nonexistent))
+        (tmp_path / "pipe.yml").write_text(_MINIMAL_PIPE_YML)
+
+        from src.__main__ import check_config
+        with pytest.raises(SystemExit):
+            check_config()
+
+        captured = capsys.readouterr()
+        output = captured.out
+
+        assert "Causa:" in output, (
+            f"Mensagem M-02 não contém campo 'Causa:'. Saída: {output!r}"
+        )
+        assert "Ação:" in output, (
+            f"Mensagem M-02 não contém campo 'Ação:'. Saída: {output!r}"
+        )
+        assert "Onde:" in output, (
+            f"Mensagem M-02 não contém campo 'Onde:'. Saída: {output!r}"
         )
 
     # ── Testes complementares de robustez ─────────────────────────────────────
