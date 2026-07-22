@@ -187,7 +187,7 @@ main()
 └── while running:
     ├── board_full_sync()  # Re-executa se mudou o dia (daily full sync)
     ├── sync_board()       # Detecta mudanças remotas/locais, aplica fila → bool
-    ├── keep_task()        # Seleciona próxima tarefa elegível → task | None
+    ├── keep_task()        # Seleciona próxima tarefa → task | AUTO_ADVANCED | None
     ├── call_agent()       # Executa agente com prompt construído
     └── sleep_time()       # Intervalo entre ciclos (condicional)
 ```
@@ -206,7 +206,8 @@ Se houve qualquer atividade (sync movimentou algo OU existe tarefa para executar
 - Boards ordenados por prioridade (menor = mais prioritário)
 - Dentro do board, varre coluna a coluna da última para a primeira (`backlog`/`todo` por último)
 - Dentro de cada coluna, pega a issue elegível mais antiga (por data)
-- Auto-advance de coluna `todo` para próxima coluna (só ocorre se nenhuma coluna posterior tiver tarefa pronta)
+- Retorno tri-estado: `task` (executa), `AUTO_ADVANCED` (avançou uma issue do `todo`; loop mantém o board e força novo sync), `None` (nada a fazer; loop avança de board)
+- Auto-advance de coluna `todo` para próxima coluna (só ocorre se nenhuma coluna posterior tiver tarefa pronta); move os arquivos, atualiza o snapshot e enfileira o `change-up` para o sync propagar ao board
 - `parallel: false` → bloqueia auto-advance se já existe issue ativa
 - Issues com `/need_human` ou `/blocked_by` no body são ignoradas
 

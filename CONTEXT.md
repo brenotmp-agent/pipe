@@ -62,7 +62,7 @@ main()
 └── while running:
     ├── board_full_sync()    # Re-executa se mudou o dia (daily full sync)
     ├── sync_board() → bool  # True se houve movimentação (up ou down)
-    ├── keep_task() → task | None
+    ├── keep_task() → task | AUTO_ADVANCED | None
     ├── call_agent()         # Resolve adapter, build_prompt, executa
     └── sleep_time()         # Dorme se !had_changes AND task==None
 ```
@@ -201,7 +201,11 @@ Cobertura em `tests/test_rate_limit_detection.py`.
 - Boards ordenados por prioridade (menor = mais prioritário)
 - Dentro do board, varredura coluna a coluna: da última coluna para a primeira (`backlog`/`todo` por último)
 - Dentro de cada coluna, seleciona a mais antiga elegível (`created_at` / `updated_at`)
-- Auto-advance: coluna `todo` → próxima coluna (apenas move arquivos, sync propaga); só dispara se nenhuma coluna posterior tiver tarefa elegível
+- Retorno tri-estado:
+  - `dict` → tarefa elegível para execução imediata (`call_agent`)
+  - `AUTO_ADVANCED` → nenhuma tarefa pronta, mas uma issue do `todo` foi avançada; o loop **mantém o board atual** e força um novo `sync_board` + `process_queue` (não avança de board nem reinicia em 0)
+  - `None` → nada a fazer neste board; o loop avança para o próximo
+- Auto-advance: coluna `todo` → próxima coluna; só dispara se nenhuma coluna posterior tiver tarefa elegível. Move os 3 arquivos, atualiza o snapshot (marca `status=change-up`, `body_path` na nova coluna, `column` permanece a de origem) e **enfileira o `change-up`** na ChangeQueue para o sync propagar ao board
 - `parallel: false` → bloqueia auto-advance se issue ativa fora de terminais
 - Elegível: `status == "ok"` + coluna com `agent` + coluna com `change.advance`
 - Bloqueada: `/need_human` ou `/blocked_by` no body

@@ -198,14 +198,26 @@ def process_queue(config: dict):
         log.warning("Sync", "Penalty no process_queue")
 
 
-def keep_task(board_id: str, config: dict) -> dict | None:
+# Sentinela de retorno do keep_task: distingue "nada a fazer" (None → avança
+# para o próximo board) de "fiz um auto-advance" (AUTO_ADVANCED → reinicia o
+# loop, pois há trabalho a caminho após o sync propagar a movimentação).
+AUTO_ADVANCED = object()
+
+
+def keep_task(board_id: str, config: dict) -> dict | object | None:
     """Seleciona a próxima tarefa elegível no board indicado.
+
+    Retorno:
+    - dict          → tarefa elegível para execução imediata
+    - AUTO_ADVANCED → nenhuma tarefa pronta, mas uma issue do 'todo' foi
+                      avançada localmente (loop deve reiniciar; trabalho a caminho)
+    - None          → nada a fazer neste board (loop pode avançar ao próximo)
 
     Lógica:
     - Varre coluna a coluna, da última para a primeira (backlog/todo por último)
     - Dentro de cada coluna, pega a issue elegível mais antiga (created_at,
       com fallback para updated_at)
-    - Se issue está em 'todo', faz auto-advance local e retorna None (espera sync)
+    - Se issue está em 'todo', faz auto-advance local e retorna AUTO_ADVANCED
     - Elegível se: status=='ok', coluna tem 'agent', coluna tem 'change.advance'
     - parallel:false → bloqueia auto-advance se já existe issue ativa
     - /need_human ou /blocked_by no body → bloqueada
@@ -245,7 +257,7 @@ def keep_task(board_id: str, config: dict) -> dict | None:
             advance_col = columns.get(todo_col, {}).get("change", {}).get("advance")
             if advance_col:
                 _auto_advance(board_id, issue, advance_col, snap)
-                return None
+                return AUTO_ADVANCED
             continue
 
         col = columns.get(col_id, {})
@@ -285,7 +297,17 @@ def _is_blocked(issue: dict) -> bool:
 
 
 def _auto_advance(board_id: str, issue: dict, target_col: str, snap: Snapshot):
-    """Move issue do todo para a próxima coluna localmente."""
+    """Move issue do todo para a próxima coluna e enfileira o change-up.
+
+    Além de mover os 3 arquivos para a coluna de destino, atualiza o snapshot
+    e informa a ChangeQueue que há uma mudança local a subir para o board.
+    A coluna no snapshot permanece a de origem de propósito: _apply_change_up
+    compara o path atual (coluna de destino) com ela para detectar e propagar
+    a movimentação ao board. A issue é marcada como change-up pendente, o que
+    também a exclui de novas seleções em keep_task até o sync concluir.
+    """
+    from src.core.board import ChangeItem, SyncEvent
+
     old_col = issue["column"]
     old_path = Path(issue["body_path"])
     new_dir = Path(".pipe/boards") / board_id / target_col
@@ -293,11 +315,23 @@ def _auto_advance(board_id: str, issue: dict, target_col: str, snap: Snapshot):
 
     # Mover os 3 arquivos
     stem = old_path.stem.rsplit("-body", 1)[0]
+    new_body_path = new_dir / f"{stem}-body.md"
     for suffix in ("-body.md", "-history.md", "-addcomment.md"):
         src = old_path.parent / f"{stem}{suffix}"
         dst = new_dir / f"{stem}{suffix}"
         if src.exists():
             src.rename(dst)
+
+    # Atualiza body_path para a nova localização e marca change-up pendente.
+    # (column permanece old_col para que _apply_change_up propague o movimento.)
+    issue["body_path"] = str(new_body_path)
+    if new_body_path.exists():
+        issue["body_mtime"] = str(new_body_path.stat().st_mtime)
+    issue["status"] = SyncEvent.CHANGE_UP.value
+    snap.save()
+
+    # Informa a ChangeQueue que a alteração foi realizada localmente.
+    ChangeQueue().add(ChangeItem.of(SyncEvent.CHANGE_UP, id=issue["id"], board=board_id))
 
     log.info("KeepTask", f"[{board_id}] auto-advance #{issue['id']}: {old_col} → {target_col}")
 
@@ -432,7 +466,14 @@ def main():
             # Sem mudanças e fila vazia: buscar tarefa no board atual
             task = keep_task(current_board, config)
 
-            if task:
+            if task is AUTO_ADVANCED:
+                # Auto-advance local: mantém o board atual (não avança nem
+                # reinicia em 0). A próxima iteração força o sync deste board
+                # (sync_board + process_queue), propagando o movimento ao
+                # board e reconciliando o estado — deixando-o realmente pronto
+                # antes de selecionar a tarefa avançada.
+                continue
+            elif task:
                 call_agent(config, task)
                 index = 0
             else:
