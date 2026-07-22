@@ -17,13 +17,13 @@ A versão é exibida no log ao iniciar a esteira.
 
 ## Changelog
 
-### Preflight de Credenciais (v1.5.0 — US-02)
+### Preflight de Credenciais (v1.6.0 — US-02)
 
 Adição de comportamento novo: verificação de credenciais antes do startup
 principal (preflight). Implementado nas tasks #34 (kiro_cli_agent) e #35
 (startup), consolidado nesta task #36 com o bump MINOR correspondente.
 
-- Bump: `1.4.3` → `1.5.0` (MINOR — adição de comportamento, sem breaking change)
+- Bump: `1.5.0` → `1.6.0` (MINOR — adição de comportamento, sem breaking change)
 - Funcionalidade: `preflight()` verifica SSH, GitHub CLI e permissões do repo
   antes de qualquer operação destrutiva
 - Referências: ADR-04, `doc/arch/rodar-no-docker/us-02-autenticacao-headless.md`

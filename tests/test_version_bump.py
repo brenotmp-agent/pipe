@@ -1,18 +1,17 @@
 """Testes de verificação do bump de versão MINOR — US-02 (preflight).
 
 Confirma que:
-1. src/core/version.py contém VERSION = "1.5.0" (bump MINOR a partir de 1.4.3).
+1. src/core/version.py contém VERSION = "1.6.0" (bump MINOR a partir de 1.5.0).
 2. A versão segue o padrão semântico MAJOR.MINOR.PATCH.
-3. O MINOR foi incrementado (de 4 para 5) e o PATCH zerado.
-4. CONTEXT.md contém a seção de changelog "Preflight de Credenciais (v1.5.0 — US-02)".
+3. O MINOR foi incrementado (de 5 para 6) e o PATCH zerado.
+4. CONTEXT.md contém a seção de changelog "Preflight de Credenciais (v1.6.0 — US-02)".
 5. A versão é exibida no log de inicialização via __main__.
 
-Nota sobre a discrepância da issue:
-  O body da issue #36 cita versão atual "1.5.0" → alvo "1.6.0". Porém o estado
-  real do repositório (branch epic, commit 6019f62) tem VERSION = "1.4.3" —
-  as tasks de desenvolvimento (#34, #35) não fizeram o bump oportunamente.
-  O bump correto, portanto, é 1.4.3 → 1.5.0 (MINOR: adição de comportamento
-  novo — preflight()). Esta task registra e valida esse estado.
+Contexto do bump:
+  O body da issue #36 define bump 1.5.0 → 1.6.0. A versão 1.5.0 é o estado
+  atual de `main` (release "Incidente — Issue Fantasma", commit 5a41183).
+  As tasks #34 e #35 implementaram o preflight() na branch epic sem realizar
+  o bump; esta task corrige omissão e registra a versão correta: 1.6.0.
 """
 
 import sys
@@ -59,22 +58,22 @@ class TestVersionFile:
         )
 
     def test_version_is_target(self):
-        """VERSION deve ser '1.5.0' após o bump MINOR da US-02."""
+        """VERSION deve ser '1.6.0' após o bump MINOR da US-02."""
         from src.core.version import VERSION
-        assert VERSION == "1.5.0", (
-            f"Esperado VERSION = '1.5.0' após bump MINOR (1.4.3 → 1.5.0 pela "
+        assert VERSION == "1.6.0", (
+            f"Esperado VERSION = '1.6.0' após bump MINOR (1.5.0 → 1.6.0 pela "
             f"adição do preflight de credenciais — US-02). Atual: '{VERSION}'"
         )
 
     def test_version_minor_incremented(self):
-        """MINOR deve ser 5 (incrementado de 4)."""
+        """MINOR deve ser 6 (incrementado de 5)."""
         from src.core.version import VERSION
         parts = VERSION.split(".")
         assert len(parts) == 3, f"Formato inválido: '{VERSION}'"
         major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
         assert major == 1, f"MAJOR deve ser 1. Atual: {major}"
-        assert minor == 5, (
-            f"MINOR deve ser 5 (bump de 4 pela adição do preflight). Atual: {minor}"
+        assert minor == 6, (
+            f"MINOR deve ser 6 (bump de 5 pela adição do preflight). Atual: {minor}"
         )
 
     def test_version_patch_zeroed(self):
@@ -91,7 +90,7 @@ class TestVersionFile:
 # ─── Verificação de CONTEXT.md ────────────────────────────────────────────────
 
 class TestContextMD:
-    """Confirma que CONTEXT.md contém a seção de changelog da v1.5.0."""
+    """Confirma que CONTEXT.md contém a seção de changelog da v1.6.0."""
 
     def test_context_md_exists(self):
         """O arquivo CONTEXT.md deve existir."""
@@ -99,17 +98,16 @@ class TestContextMD:
             f"CONTEXT.md não encontrado: {CONTEXT_FILE}"
         )
 
-    def test_context_contains_v150_section(self):
-        """CONTEXT.md deve conter seção de changelog para v1.5.0 — US-02."""
+    def test_context_contains_v160_section(self):
+        """CONTEXT.md deve conter seção de changelog para v1.6.0 — US-02."""
         content = CONTEXT_FILE.read_text(encoding="utf-8")
-        assert "1.5.0" in content, (
-            "CONTEXT.md deve mencionar v1.5.0 (seção de changelog da US-02 / preflight)"
+        assert "1.6.0" in content, (
+            "CONTEXT.md deve mencionar v1.6.0 (seção de changelog da US-02 / preflight)"
         )
 
     def test_context_contains_preflight_section(self):
         """CONTEXT.md deve conter seção descrevendo o preflight de credenciais."""
         content = CONTEXT_FILE.read_text(encoding="utf-8")
-        # Aceita variações de título (v1.5.0 ou v1.6.0 conforme refatoração)
         assert "Preflight de Credenciais" in content or "preflight" in content.lower(), (
             "CONTEXT.md deve conter seção sobre Preflight de Credenciais (US-02)"
         )
@@ -125,7 +123,7 @@ class TestContextMD:
 # ─── Verificação de integração: versão no log de boot ────────────────────────
 
 class TestVersionInBootLog:
-    """Verifica que a versão importada pelo __main__ é a 1.5.0."""
+    """Verifica que a versão importada pelo __main__ é a 1.6.0."""
 
     def test_main_imports_version(self):
         """src/__main__.py deve importar VERSION de src.core.version."""
@@ -134,22 +132,22 @@ class TestVersionInBootLog:
             "__main__.py deve importar VERSION de src.core.version"
         )
 
-    def test_main_version_is_150(self):
-        """VERSION importado por __main__ deve ser '1.5.0'."""
+    def test_main_version_is_160(self):
+        """VERSION importado por __main__ deve ser '1.6.0'."""
         import importlib
         import src.core.version as version_mod
         importlib.reload(version_mod)
-        assert version_mod.VERSION == "1.5.0", (
-            f"__main__ usará VERSION = '{version_mod.VERSION}'. Esperado '1.5.0'"
+        assert version_mod.VERSION == "1.6.0", (
+            f"__main__ usará VERSION = '{version_mod.VERSION}'. Esperado '1.6.0'"
         )
 
     def test_version_log_message_format(self):
         """A mensagem de log de boot deve incluir a versão formatada."""
         main_source = (ROOT / "src" / "__main__.py").read_text(encoding="utf-8")
-        # Verifica que o log exibe a versão (padrão: f"...v{VERSION}")
         assert "VERSION" in main_source, (
             "__main__.py deve usar VERSION na mensagem de inicialização"
         )
-        assert "v{VERSION}" in main_source or f"v{'{VERSION}'}" in main_source, (
+        # Verifica que o log exibe a versão no formato v{VERSION} (f-string)
+        assert "v{VERSION}" in main_source, (
             "A mensagem de boot deve exibir a versão no formato v{VERSION}"
         )
