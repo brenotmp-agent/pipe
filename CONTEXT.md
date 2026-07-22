@@ -51,7 +51,10 @@ src/
 ```
 main()
 ├── check_config()         # Valida pipe.yml, SSH, contexts
-├── startup()              # Configura SSH, clona repos, limpa fila anterior
+├── startup()              # Configura SSH, preflight, clona repos, limpa fila anterior
+│   ├── _setup_ssh()       # Copia chave SSH para ~/.ssh/id_pipe
+│   ├── preflight()        # Verifica GH_TOKEN + KIRO_API_KEY (fail-fast agregado)
+│   └── [clone, context, queue cleanup]
 ├── board_full_sync()      # Sync completo
 │   ├── Cria .pipe/boards/<board_id>/<col_id>/
 │   ├── Sincroniza snapshot local (mapa de colunas)
