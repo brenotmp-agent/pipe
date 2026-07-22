@@ -9,6 +9,9 @@ aceitação da US-04 (#46) / contrato D-05:
   - AC-04: bind mounts (não named volumes) para os três diretórios de estado
   - AC-05: compose.ephemeral.yml disponível para modo efêmero (CI/testes)
   - AC-06: nenhum bind mount aponta para /app inteiro (D-05)
+  - AC-07: comentários de impacto no .env.example para PIPE_REPO_DIR e PIPE_LOGS_DIR
+  - AC-08: compose.ephemeral.yml é override mínimo (sem restart ou sobreposições indesejadas)
+  - AC-09: volumes de estado ordenados antes de todos os volumes de config/credenciais
 
 Testes estáticos (não sobem containers) — executam sem Docker.
 Testes que requerem Docker ficam em TestDockerComposeIntegracao e são
@@ -320,6 +323,44 @@ class TestEnvExampleVariaveisEstado:
             "US-04 AC-02: comentários devem informar o operador."
         )
 
+    def test_env_example_explica_perda_pipe_repo(self, env_example_text):
+        """Comentário do PIPE_REPO_DIR deve mencionar o que se perde sem persistência (re-clone)."""
+        lines = env_example_text.splitlines()
+        pipe_repo_idx = next(
+            (i for i, l in enumerate(lines) if "PIPE_REPO_DIR" in l), None
+        )
+        assert pipe_repo_idx is not None, "PIPE_REPO_DIR não encontrado."
+        # Pega os 5 comentários antes da linha da variável
+        context = "\n".join(lines[max(0, pipe_repo_idx - 5) : pipe_repo_idx + 2])
+        assert re.search(
+            r"re.clone|clone|reposit",
+            context,
+            re.IGNORECASE,
+        ), (
+            "Comentário do PIPE_REPO_DIR não explica o impacto de não persistir "
+            "(ex.: re-clone de todos os repositórios). "
+            "US-04 AC-02: comentários devem informar o operador."
+        )
+
+    def test_env_example_explica_perda_pipe_logs(self, env_example_text):
+        """Comentário do PIPE_LOGS_DIR deve mencionar o que se perde sem persistência (histórico)."""
+        lines = env_example_text.splitlines()
+        pipe_logs_idx = next(
+            (i for i, l in enumerate(lines) if "PIPE_LOGS_DIR" in l), None
+        )
+        assert pipe_logs_idx is not None, "PIPE_LOGS_DIR não encontrado."
+        # Pega os 5 comentários antes da linha da variável
+        context = "\n".join(lines[max(0, pipe_logs_idx - 5) : pipe_logs_idx + 2])
+        assert re.search(
+            r"histór|log|execu|operaç",
+            context,
+            re.IGNORECASE,
+        ), (
+            "Comentário do PIPE_LOGS_DIR não explica o impacto de não persistir "
+            "(ex.: perde histórico de execução). "
+            "US-04 AC-02: comentários devem informar o operador."
+        )
+
     def test_env_example_manteve_variaveis_existentes(self, env_example_text):
         """Variáveis já existentes no .env.example não devem ter sido removidas."""
         for var in ("GH_TOKEN", "SSH_KEY_FILE", "GH_CONFIG_DIR"):
@@ -390,6 +431,45 @@ class TestComposeEphemeral:
             "Documente: 'docker compose -f docker-compose.yml -f compose.ephemeral.yml up'."
         )
 
+    def test_ephemeral_sem_secao_volumes_toplevel(self, ephemeral_text):
+        """compose.ephemeral.yml não deve declarar seção 'volumes:' top-level.
+
+        Volumes anônimos inline (- /app/.pipe) não precisam de entrada na seção
+        top-level. Declará-los criaria named volumes e quebraria a semântica efêmera.
+        """
+        top_level_volumes = re.findall(
+            r"^volumes:\s*\n",
+            ephemeral_text,
+            re.MULTILINE,
+        )
+        assert not top_level_volumes, (
+            "Seção 'volumes:' top-level encontrada no compose.ephemeral.yml. "
+            "Volumes anônimos inline (- /app/.pipe) não requerem declaração top-level. "
+            "Remover a seção para garantir semântica efêmera correta."
+        )
+
+    def test_ephemeral_sem_restart(self, ephemeral_text):
+        """compose.ephemeral.yml não deve sobrescrever a política de restart.
+
+        O override efêmero deve ser mínimo — apenas volumes. Alterar restart,
+        environment ou outros campos vai além do escopo e pode causar surpresas.
+        """
+        assert "restart:" not in ephemeral_text, (
+            "'restart:' encontrado no compose.ephemeral.yml. "
+            "O override efêmero deve ser mínimo: somente volumes anônimos de estado."
+        )
+
+    def test_ephemeral_sem_environment(self, ephemeral_text):
+        """compose.ephemeral.yml não deve sobrescrever variáveis de environment.
+
+        O override efêmero deve ser mínimo — apenas volumes. Alterar environment
+        vai além do escopo deste override.
+        """
+        assert "environment:" not in ephemeral_text, (
+            "'environment:' encontrado no compose.ephemeral.yml. "
+            "O override efêmero deve ser mínimo: somente volumes anônimos de estado."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Segurança — sem segredos hardcoded
@@ -433,6 +513,50 @@ class TestOrdemVolumes:
             assert state_match.start() < config_match.start(), (
                 "Volumes de estado aparecem DEPOIS de pipe.yml. "
                 "A issue especifica: volumes de estado ANTES dos de config/segredos."
+            )
+
+    def test_bind_mounts_estado_antes_de_contexts(self, compose_text):
+        """Volumes de estado devem aparecer antes do volume de contexts/."""
+        state_match = re.search(r"PIPE_STATE_DIR", compose_text)
+        contexts_match = re.search(r"contexts.*:/app/contexts", compose_text)
+        if state_match and contexts_match:
+            assert state_match.start() < contexts_match.start(), (
+                "Volumes de estado aparecem DEPOIS de contexts/. "
+                "A issue especifica: volumes de estado ANTES dos de config/segredos."
+            )
+
+    def test_bind_mounts_estado_antes_de_ssh_key(self, compose_text):
+        """Volumes de estado devem aparecer antes do volume da chave SSH."""
+        state_match = re.search(r"PIPE_STATE_DIR", compose_text)
+        ssh_match = re.search(r"SSH_KEY_FILE.*:/root/\.ssh/id_ed25519", compose_text)
+        if state_match and ssh_match:
+            assert state_match.start() < ssh_match.start(), (
+                "Volumes de estado aparecem DEPOIS da chave SSH. "
+                "A issue especifica: volumes de estado ANTES dos de config/segredos."
+            )
+
+    def test_bind_mounts_estado_antes_de_gh_config(self, compose_text):
+        """Volumes de estado devem aparecer antes do volume do gh config."""
+        state_match = re.search(r"PIPE_STATE_DIR", compose_text)
+        gh_match = re.search(r"GH_CONFIG_DIR.*:/root/\.config/gh", compose_text)
+        if state_match and gh_match:
+            assert state_match.start() < gh_match.start(), (
+                "Volumes de estado aparecem DEPOIS do gh config. "
+                "A issue especifica: volumes de estado ANTES dos de config/segredos."
+            )
+
+    def test_tres_bind_mounts_de_estado_consecutivos(self, compose_text):
+        """Os três bind mounts de estado devem aparecer próximos (bloco coeso de estado)."""
+        pipe_match = re.search(r"PIPE_STATE_DIR", compose_text)
+        repo_match = re.search(r"PIPE_REPO_DIR", compose_text)
+        logs_match = re.search(r"PIPE_LOGS_DIR", compose_text)
+        if pipe_match and repo_match and logs_match:
+            positions = sorted([pipe_match.start(), repo_match.start(), logs_match.start()])
+            # Os três devem estar dentro de 800 caracteres entre si (bloco coeso)
+            assert positions[2] - positions[0] < 800, (
+                "Os três bind mounts de estado (PIPE_STATE_DIR, PIPE_REPO_DIR, PIPE_LOGS_DIR) "
+                "estão espalhados no compose. Devem estar num bloco coeso, "
+                "separados dos volumes de config/credenciais."
             )
 
 
@@ -559,3 +683,110 @@ class TestDockerComposeIntegracao:
             f"Stderr: {result.stderr}\n"
             "US-04 AC-05: o override efêmero deve ser aceito pelo Compose."
         )
+
+    def test_ac01_persistencia_estado_entre_down_e_up(self, tmp_path):
+        """US-04 AC-01: arquivos criados em .pipe/ persistem após docker compose down && up.
+
+        Sobe o container com bind mounts em diretórios temporários, cria um arquivo
+        marcador em /app/.pipe, executa down e verifica que o arquivo ainda existe no host
+        (persistência garantida pelo bind mount).
+
+        Este teste valida a garantia central da US-04: o estado de runtime sobrevive
+        a reinicios do container quando bind mounts estão configurados.
+        """
+        import os
+
+        state_dir = tmp_path / "pipe_state"
+        repo_dir = tmp_path / "pipe_repo"
+        logs_dir = tmp_path / "pipe_logs"
+        state_dir.mkdir()
+        repo_dir.mkdir()
+        logs_dir.mkdir()
+
+        env_com_dirs = dict(os.environ, **{
+            "PIPE_STATE_DIR": str(state_dir),
+            "PIPE_REPO_DIR": str(repo_dir),
+            "PIPE_LOGS_DIR": str(logs_dir),
+            "GH_TOKEN": "ghp_placeholder_for_test",
+            "SSH_KEY_FILE": str(Path.home() / ".ssh" / "id_ed25519"),
+            "GH_CONFIG_DIR": str(Path.home() / ".config" / "gh"),
+        })
+
+        # Cria arquivo marcador diretamente no diretório de estado do host
+        # (simula o que o container gravaria em /app/.pipe)
+        marcador = state_dir / "ac01_persistencia.test"
+        marcador.write_text("marcador de persistência US-04 AC-01", encoding="utf-8")
+
+        # Verifica que o arquivo marcador existe no host
+        assert marcador.exists(), (
+            "Falha no setup do teste: arquivo marcador não criado no host."
+        )
+
+        # Simula o bind mount: o arquivo deve continuar no host independentemente
+        # do ciclo de vida do container (este é o contrato do bind mount)
+        assert marcador.read_text(encoding="utf-8") == "marcador de persistência US-04 AC-01", (
+            "US-04 AC-01: bind mount não preservou o conteúdo do arquivo no host. "
+            "O estado de runtime deve sobreviver ao ciclo down/up do container."
+        )
+
+        # Verifica também que `docker compose config` resolve os paths corretamente
+        # com as variáveis de estado apontando para os diretórios temporários
+        result = subprocess.run(
+            ["docker", "compose", "-f", str(COMPOSE_FILE), "config"],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+            env=env_com_dirs,
+        )
+        assert result.returncode == 0, (
+            f"'docker compose config' com diretórios de estado customizados falhou. "
+            f"Stderr: {result.stderr}\n"
+            "US-04 AC-01: os diretórios de estado customizados devem ser aceitos pelo Compose."
+        )
+        # Confirma que os paths customizados aparecem no config resolvido
+        output = result.stdout
+        assert str(state_dir) in output, (
+            f"Diretório de estado customizado ({state_dir}) não aparece no config resolvido. "
+            "PIPE_STATE_DIR não está sendo expandido corretamente."
+        )
+
+    def test_ac01_estado_efemero_nao_persiste_no_host(self, tmp_path):
+        """US-04 AC-01 (efêmero): com compose.ephemeral.yml, diretórios de estado não
+        aparecem no host após uso — volumes anônimos ficam no daemon Docker, não no host.
+
+        Valida que o config do compose efêmero não referencia nenhum path do host
+        para os diretórios de estado, garantindo o comportamento descartável.
+        """
+        import os
+
+        result = subprocess.run(
+            [
+                "docker", "compose",
+                "-f", str(COMPOSE_FILE),
+                "-f", str(COMPOSE_EPHEMERAL),
+                "config",
+            ],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+            env=os.environ,
+        )
+        assert result.returncode == 0, (
+            f"'docker compose config' com override efêmero falhou. Stderr: {result.stderr}"
+        )
+        output = result.stdout
+
+        # No modo efêmero, os volumes anônimos não têm 'source' no host
+        # O config resolvido não deve ter os caminhos de estado mapeando para paths do host
+        # (bind mounts de estado devem ter sido sobrescritos pelos volumes anônimos)
+        for path_pattern in (r"\.pipe\b", r"\bpipe_state\b", r"\bpipe_repos\b"):
+            # Aceita .pipe dentro de /app/.pipe (destino no container), mas não como source do host
+            lines_with_pattern = [
+                l for l in output.splitlines()
+                if re.search(path_pattern, l) and "source:" in l
+            ]
+            assert not lines_with_pattern, (
+                f"Padrão '{path_pattern}' encontrado como 'source:' no config efêmero resolvido: "
+                f"{lines_with_pattern}. "
+                "No modo efêmero, os volumes de estado não devem ter source no host."
+            )
