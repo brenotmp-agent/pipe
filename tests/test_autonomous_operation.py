@@ -3,9 +3,14 @@
 AC-02: Falta de credencial ou configuração inválida gera SystemExit(1) com
 mensagem clara, sem travamento silencioso.
 
+AC-05: O gate need_human NÃO interrompe o container. Issues marcadas com
+/need_human (ou /blocked_by) são ignoradas por keep_task; o loop continua
+sem exceção e sem SystemExit.
+
 Cobre:
     - src/core/config.py :: _validate_env(), _validate_agents()
     - src/__main__.py    :: check_config() (wrapper com SystemExit)
+    - src/__main__.py    :: _is_blocked(issue), keep_task(board_id, config)
 """
 
 import sys
@@ -197,3 +202,279 @@ class TestFailFastCheckConfig:
         result = check_config()
         assert isinstance(result, dict)
         assert "sleep" in result
+
+
+# ─── helpers de need_human ────────────────────────────────────────────────────
+
+def _minimal_config(board_id: str = "task", col_id: str = "doing") -> dict:
+    """Config mínima para keep_task funcionar sem dependências externas."""
+    return {
+        "boards": {
+            board_id: {
+                "name": "Task",
+                "priority": 0,
+                "flow": "feature",
+                "columns": {
+                    col_id: {
+                        "name": "Doing",
+                        "agent": "dev",
+                        "gitevents": "no-branch",
+                        "change": {"advance": "done"},
+                    }
+                },
+            }
+        },
+        "git": {
+            "repo": {"main": "git@github.com:x/y.git"},
+            "flow": {"base": "main"},
+        },
+    }
+
+
+def _write_body(directory: "Path", issue_id: str, slug: str, content: str) -> "Path":
+    """Cria o arquivo -body.md de uma issue no diretório de coluna fornecido.
+
+    O nome segue o padrão `<id>-<slug>-body.md`. Retorna o Path do arquivo.
+    """
+    body_file = directory / f"{issue_id}-{slug}-body.md"
+    body_file.write_text(content, encoding="utf-8")
+    return body_file
+
+
+def _write_snapshot(tmp_path: "Path", board_id: str, issues: list) -> None:
+    """Persiste um snapshot.json mínimo para o board indicado em tmp_path.
+
+    Cada item de `issues` deve ser um dict com ao menos 'id', 'column' e
+    'body_path'. Os campos opcionais seguem o formato do Snapshot real.
+    """
+    import json
+
+    snap_dir = tmp_path / ".pipe" / "boards" / board_id
+    snap_dir.mkdir(parents=True, exist_ok=True)
+    (snap_dir / "snapshot.json").write_text(
+        json.dumps({"board": {}, "issues": issues, "last_sync": None}, indent=2),
+        encoding="utf-8",
+    )
+
+
+# ─── TestNeedHumanGate ────────────────────────────────────────────────────────
+
+class TestNeedHumanGate:
+    """AC-05 da US-05: /need_human não interrompe o loop.
+
+    O gate de bloqueio apenas pula a issue — nunca levanta exceção, nunca
+    chama SystemExit. O loop principal continua para a próxima issue/board.
+    """
+
+    # ── Teste 1 ───────────────────────────────────────────────────────────────
+
+    def test_need_human_issue_is_skipped_in_keep_task(self, tmp_path, monkeypatch):
+        """Issue com /need_human no body deve ser ignorada; a seguinte é retornada.
+
+        Cria dois arquivos de issue na coluna 'doing':
+        - Issue #10: body contém /need_human — deve ser pulada.
+        - Issue #11: body limpo — deve ser retornada por keep_task.
+
+        O snapshot registra as duas issues com body_path apontando para os
+        arquivos reais em disco (padrão de produção de _is_blocked).
+        """
+        monkeypatch.chdir(tmp_path)
+
+        board_id = "task"
+        col_id = "doing"
+        col_dir = tmp_path / ".pipe" / "boards" / board_id / col_id
+        col_dir.mkdir(parents=True, exist_ok=True)
+
+        # Issue 10: bloqueada por need_human
+        body_10 = _write_body(col_dir, "10", "issue-bloqueada",
+                               "# Issue bloqueada\n\nTexto.\n\n@---\n/need_human\n")
+        # Issue 11: sem bloqueio — elegível
+        body_11 = _write_body(col_dir, "11", "issue-elegivel",
+                               "# Issue elegível\n\nTexto normal.\n")
+
+        _write_snapshot(tmp_path, board_id, [
+            {"id": "10", "column": col_id, "status": "ok",
+             "body_path": str(body_10), "labels": []},
+            {"id": "11", "column": col_id, "status": "ok",
+             "body_path": str(body_11), "labels": []},
+        ])
+
+        from src.__main__ import keep_task
+        config = _minimal_config(board_id, col_id)
+
+        task = keep_task(board_id, config)
+
+        assert task is not None, "keep_task não deve retornar None quando há issue elegível"
+        assert task["issue"]["id"] == "11", (
+            f"A issue retornada deve ser a #11 (não bloqueada), não a #{task['issue']['id']}"
+        )
+
+    # ── Teste 2 ───────────────────────────────────────────────────────────────
+
+    def test_need_human_does_not_stop_loop(self, tmp_path, monkeypatch):
+        """Se todas as issues têm /need_human, keep_task retorna None sem exceção.
+
+        Garante que o gate não levanta SystemExit, RuntimeError ou qualquer
+        outra exceção — o loop principal pode continuar normalmente.
+        """
+        monkeypatch.chdir(tmp_path)
+
+        board_id = "task"
+        col_id = "doing"
+        col_dir = tmp_path / ".pipe" / "boards" / board_id / col_id
+        col_dir.mkdir(parents=True, exist_ok=True)
+
+        # Três issues, todas com /need_human
+        body_files = []
+        for i, slug in enumerate(["alpha", "beta", "gamma"], start=20):
+            bf = _write_body(col_dir, str(i), slug,
+                             f"# Issue {slug}\n\n@---\n/need_human\n")
+            body_files.append((str(i), bf))
+
+        _write_snapshot(tmp_path, board_id, [
+            {"id": issue_id, "column": col_id, "status": "ok",
+             "body_path": str(bf), "labels": []}
+            for issue_id, bf in body_files
+        ])
+
+        from src.__main__ import keep_task
+        config = _minimal_config(board_id, col_id)
+
+        # Não deve levantar exceção — apenas retornar None
+        result = keep_task(board_id, config)
+
+        assert result is None, (
+            "keep_task deve retornar None quando todas as issues estão bloqueadas"
+        )
+
+    # ── Teste 3 ───────────────────────────────────────────────────────────────
+
+    def test_blocked_by_also_skips_issue(self, tmp_path, monkeypatch):
+        """/blocked_by ativa o mesmo gate que /need_human; issue deve ser pulada.
+
+        Usa o mesmo mecanismo (_is_blocked) — verifica que blocked_by também
+        faz keep_task retornar None quando é a única issue no board.
+        """
+        monkeypatch.chdir(tmp_path)
+
+        board_id = "task"
+        col_id = "doing"
+        col_dir = tmp_path / ".pipe" / "boards" / board_id / col_id
+        col_dir.mkdir(parents=True, exist_ok=True)
+
+        body_file = _write_body(col_dir, "30", "issue-dependente",
+                                "# Issue dependente\n\n@---\n/blocked_by #5\n")
+
+        _write_snapshot(tmp_path, board_id, [
+            {"id": "30", "column": col_id, "status": "ok",
+             "body_path": str(body_file), "labels": []},
+        ])
+
+        from src.__main__ import keep_task
+        config = _minimal_config(board_id, col_id)
+
+        result = keep_task(board_id, config)
+
+        assert result is None, (
+            "Issue com /blocked_by deve ser ignorada; keep_task deve retornar None"
+        )
+
+    # ── Teste 4 ───────────────────────────────────────────────────────────────
+
+    def test_is_blocked_detects_need_human_in_commands_block(self, tmp_path, monkeypatch):
+        """_is_blocked detecta /need_human corretamente no bloco @---.
+
+        Verifica dois casos:
+        - Issue com /need_human no bloco → True
+        - Issue sem qualquer comando de bloqueio → False
+
+        ATENÇÃO: _is_blocked lê o arquivo via `body_path` (não o campo `body`
+        do dict). O teste cria arquivos reais em disco, respeitando o contrato
+        de produção.
+        """
+        monkeypatch.chdir(tmp_path)
+
+        from src.__main__ import _is_blocked
+
+        # Arquivo com /need_human no bloco @---
+        body_blocked = tmp_path / "10-bloqueada-body.md"
+        body_blocked.write_text(
+            "# Título\n\nTexto normal.\n\n@---\n/need_human\n",
+            encoding="utf-8",
+        )
+
+        # Arquivo sem nenhum comando de bloqueio
+        body_clean = tmp_path / "11-limpa-body.md"
+        body_clean.write_text(
+            "# Título\n\nTexto normal.\n",
+            encoding="utf-8",
+        )
+
+        issue_with_need_human = {"body_path": str(body_blocked)}
+        issue_without = {"body_path": str(body_clean)}
+
+        assert _is_blocked(issue_with_need_human) is True, (
+            "_is_blocked deve retornar True para issue com /need_human"
+        )
+        assert _is_blocked(issue_without) is False, (
+            "_is_blocked deve retornar False para issue sem /need_human ou /blocked_by"
+        )
+
+    # ── Teste 5 (complementar) ────────────────────────────────────────────────
+
+    def test_is_blocked_returns_false_for_missing_body_file(self, tmp_path, monkeypatch):
+        """_is_blocked retorna False quando body_path não existe (arquivo ausente).
+
+        Situação possível em race condition entre sync e execução do agente.
+        O gate deve ser conservador: sem arquivo = sem evidência de bloqueio.
+        """
+        monkeypatch.chdir(tmp_path)
+
+        from src.__main__ import _is_blocked
+
+        issue_no_file = {"body_path": str(tmp_path / "nao-existe-body.md")}
+        assert _is_blocked(issue_no_file) is False
+
+    # ── Teste 6 (complementar) ────────────────────────────────────────────────
+
+    def test_need_human_and_clean_issues_mixed_returns_clean(self, tmp_path, monkeypatch):
+        """Com issues mistas (bloqueadas + limpas), a primeira limpa é retornada.
+
+        Garante ordenação e seleção correta: a issue mais antiga elegível vence,
+        independentemente de quantas issues bloqueadas existam antes dela.
+        """
+        monkeypatch.chdir(tmp_path)
+
+        board_id = "task"
+        col_id = "doing"
+        col_dir = tmp_path / ".pipe" / "boards" / board_id / col_id
+        col_dir.mkdir(parents=True, exist_ok=True)
+
+        # Issues #40, #41, #42 bloqueadas; #43 limpa
+        snapshot_issues = []
+        for i in range(40, 43):
+            bf = _write_body(col_dir, str(i), f"bloqueada-{i}",
+                             f"# Bloqueada {i}\n\n@---\n/need_human\n")
+            snapshot_issues.append({
+                "id": str(i), "column": col_id, "status": "ok",
+                "body_path": str(bf), "labels": [],
+                "created_at": f"2026-01-{i-39:02d}T00:00:00Z",
+            })
+
+        bf_clean = _write_body(col_dir, "43", "elegivel",
+                               "# Elegível\n\nTexto.\n")
+        snapshot_issues.append({
+            "id": "43", "column": col_id, "status": "ok",
+            "body_path": str(bf_clean), "labels": [],
+            "created_at": "2026-01-05T00:00:00Z",
+        })
+
+        _write_snapshot(tmp_path, board_id, snapshot_issues)
+
+        from src.__main__ import keep_task
+        config = _minimal_config(board_id, col_id)
+
+        task = keep_task(board_id, config)
+
+        assert task is not None
+        assert task["issue"]["id"] == "43"
