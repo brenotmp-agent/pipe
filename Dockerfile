@@ -66,7 +66,7 @@ ARG KIRO_CLI_SHA256=49d712558cc930d3570387ce468887ca0b510ba8b5f08e2f3c7a7a55d44e
 RUN curl --proto '=https' --tlsv1.2 -fsSL "$KIRO_CLI_URL" -o /tmp/kirocli.zip \
     && echo "${KIRO_CLI_SHA256}  /tmp/kirocli.zip" | sha256sum -c - \
     && unzip -q /tmp/kirocli.zip -d /tmp/kirocli_extract \
-    && /tmp/kirocli_extract/kirocli/install.sh \
+    && /tmp/kirocli_extract/kirocli/install.sh --no-confirm \
     && rm -rf /tmp/kirocli.zip /tmp/kirocli_extract \
     && ~/.local/bin/kiro-cli --version
 
