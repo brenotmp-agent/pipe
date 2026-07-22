@@ -161,12 +161,22 @@ class TestVersoesPinadas:
         )
 
     def test_gh_cli_versao_declarada(self, dockerfile_text):
-        """GitHub CLI deve ter versão declarada (via ARG GH_VERSION ou apt install gh=X.Y.Z)."""
-        versao_apt = re.search(r"gh=\d+\.\d+\.\d+", dockerfile_text)
-        versao_arg = re.search(r"GH_VERSION=\d+\.\d+\.\d+", dockerfile_text)
-        assert versao_apt or versao_arg, (
+        """GitHub CLI deve ter versão 2.96.0 declarada (fix GHSA-8cg3-r6g9-fpg2).
+
+        A issue especifica explicitamente 2.96.0 como versão verificada em 2026-07-21.
+        Esta versão inclui correção de segurança — versões anteriores (ex.: 2.94.0) não devem ser aceitas.
+        """
+        versao_apt = re.search(r"gh=(\d+\.\d+\.\d+)", dockerfile_text)
+        versao_arg = re.search(r"GH_VERSION=(\d+\.\d+\.\d+)", dockerfile_text)
+        versao_encontrada = (versao_apt or versao_arg)
+        assert versao_encontrada, (
             "Versão do GitHub CLI não encontrada. "
-            "Declare gh=X.Y.Z no apt install ou ARG GH_VERSION=X.Y.Z."
+            "Declare gh=2.96.0 no apt install ou ARG GH_VERSION=2.96.0."
+        )
+        versao = versao_encontrada.group(1)
+        assert versao == "2.96.0", (
+            f"Versão do GitHub CLI é {versao!r}, esperada 2.96.0. "
+            "Issue especifica 2.96.0 (inclui fix GHSA-8cg3-r6g9-fpg2)."
         )
 
     def test_gh_cli_nao_usa_latest(self, dockerfile_text):
@@ -323,38 +333,71 @@ class TestDockerIntegracao:
 
     @pytest.fixture(scope="class", autouse=True)
     def build_image(self):
-        """Constrói a imagem antes dos testes de integração."""
+        """Constrói a imagem antes dos testes de integração.
+
+        Falha (FAIL, não skip) se o build quebrar: build funcional é o critério
+        de aceitação mais importante da issue. Um skip mascararia o problema.
+        """
         result = subprocess.run(
             ["docker", "build", "-t", self.IMAGE, str(REPO_ROOT)],
             capture_output=True,
             text=True,
         )
         if result.returncode != 0:
-            pytest.skip(f"Build falhou — integrações ignoradas:\n{result.stderr}")
+            pytest.fail(
+                f"'docker build' falhou (exit {result.returncode}) — "
+                "AC explícito da issue: 'docker build -t pipe-esteira . conclui sem erro'.\n"
+                f"Stderr:\n{result.stderr}"
+            )
 
-    def _run(self, cmd, image=None):
-        full_cmd = ["docker", "run", "--rm", image or self.IMAGE] + cmd
-        return subprocess.run(full_cmd, capture_output=True, text=True)
+    def _run_cmd(self, entrypoint, args=None, image=None):
+        """Executa um binário específico no container via --entrypoint.
+
+        Necessário porque o Dockerfile define ENTRYPOINT ["python", "-m", "src"],
+        então argumentos passados sem --entrypoint seriam concatenados ao entrypoint
+        padrão em vez de executar o binário desejado.
+        """
+        cmd = ["docker", "run", "--rm", "--entrypoint", entrypoint, image or self.IMAGE]
+        if args:
+            cmd.extend(args)
+        return subprocess.run(cmd, capture_output=True, text=True)
+
+    def _run_default(self, image=None):
+        """Executa o container com o ENTRYPOINT padrão (python -m src)."""
+        cmd = ["docker", "run", "--rm", image or self.IMAGE]
+        return subprocess.run(cmd, capture_output=True, text=True)
 
     def test_python_version_312(self):
         """python --version deve reportar 3.12.x."""
-        r = self._run(["python", "--version"])
+        r = self._run_cmd("python", ["--version"])
         assert r.returncode == 0
         assert "3.12" in r.stdout + r.stderr
 
     def test_git_disponivel(self):
         """git deve estar no PATH."""
-        r = self._run(["git", "--version"])
+        r = self._run_cmd("git", ["--version"])
         assert r.returncode == 0
 
     def test_gh_disponivel(self):
-        """gh deve estar no PATH."""
-        r = self._run(["gh", "--version"])
+        """gh deve estar no PATH e na versão 2.96.0."""
+        r = self._run_cmd("gh", ["--version"])
         assert r.returncode == 0
+        assert "2.96.0" in r.stdout + r.stderr, (
+            f"gh não reporta versão 2.96.0: {(r.stdout + r.stderr).strip()!r}"
+        )
+
+    def test_kiro_cli_disponivel(self):
+        """kiro-cli deve estar no PATH."""
+        r = self._run_cmd("kiro-cli", ["--version"])
+        # kiro-cli pode retornar exit-code != 0 em modo headless sem credenciais,
+        # mas deve existir no PATH (FileNotFoundError → returncode 127)
+        assert r.returncode != 127, (
+            "kiro-cli não encontrado no PATH dentro do container."
+        )
 
     def test_usuario_nao_root(self):
         """Container deve executar como uid 1000 (pipe), não root."""
-        r = self._run(["id"])
+        r = self._run_cmd("id")
         assert r.returncode == 0
         assert "uid=1000" in r.stdout, (
             f"Container rodando como usuário inesperado: {r.stdout.strip()}"
@@ -363,7 +406,7 @@ class TestDockerIntegracao:
 
     def test_pythonunbuffered_no_env(self):
         """PYTHONUNBUFFERED=1 deve estar no ambiente do container."""
-        r = self._run(["env"])
+        r = self._run_cmd("env")
         assert r.returncode == 0
         assert "PYTHONUNBUFFERED=1" in r.stdout, (
             "AC-04 violado: PYTHONUNBUFFERED=1 não está no ambiente do container."
@@ -371,21 +414,21 @@ class TestDockerIntegracao:
 
     def test_pipe_yml_ausente_na_imagem(self):
         """pipe.yml não deve existir dentro da imagem."""
-        r = self._run(["test", "-f", "/app/pipe.yml"])
+        r = self._run_cmd("test", ["-f", "/app/pipe.yml"])
         assert r.returncode != 0, (
             "pipe.yml encontrado em /app — segredos embutidos na imagem (viola RF-05)."
         )
 
     def test_contexts_ausente_na_imagem(self):
         """contexts/ não deve existir dentro da imagem."""
-        r = self._run(["test", "-d", "/app/contexts"])
+        r = self._run_cmd("test", ["-d", "/app/contexts"])
         assert r.returncode != 0, (
             "contexts/ encontrado em /app — configuração de agentes não deve ser embarcada."
         )
 
     def test_sem_variaveis_exit_code_nao_zero(self):
         """Container sem variáveis de ambiente deve falhar (check_config) com exit-code != 0."""
-        r = self._run([])
+        r = self._run_default()
         assert r.returncode != 0, (
             "AC-07: container sem variáveis de ambiente retornou exit-code 0. "
             "check_config deve falhar antecipadamente."
@@ -393,5 +436,5 @@ class TestDockerIntegracao:
 
     def test_src_presente_na_imagem(self):
         """src/ deve existir em /app/src dentro da imagem."""
-        r = self._run(["test", "-d", "/app/src"])
+        r = self._run_cmd("test", ["-d", "/app/src"])
         assert r.returncode == 0, "/app/src ausente na imagem."
