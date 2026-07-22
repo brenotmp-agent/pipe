@@ -18,15 +18,15 @@ LABEL org.opencontainers.image.title="esteira-agentica" \
 # ca-certificates, curl, gnupg: instalação do gh CLI
 # ---------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git=1:2.39.5-0+deb12u2 \
-        openssh-client=1:9.2p1-2+deb12u5 \
-        ca-certificates=20230311 \
-        curl=7.88.1-10+deb12u12 \
-        gnupg=2.2.40-1.1 \
+        git \
+        openssh-client \
+        ca-certificates \
+        curl \
+        gnupg \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
-# GitHub CLI (versão pinada: 2.94.0)
+# GitHub CLI (versão pinada: 2.96.0)
 # Repositório apt oficial do GitHub
 # ADR-02: autenticação via GH_TOKEN, sem gh auth login
 # ---------------------------------------------------------------------------
@@ -36,7 +36,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends gh=2.94.0 \
+    && apt-get install -y --no-install-recommends gh=2.96.0 \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
@@ -46,16 +46,13 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 RUN useradd --create-home --uid 1000 --shell /bin/bash pipe
 
 # ---------------------------------------------------------------------------
-# kiro-cli (versão pinada: 2.4.2) — instalado como binário ELF standalone
+# kiro-cli — binário ELF copiado do host via prepare-docker.sh
 # ADR-01: autenticação por KIRO_API_KEY (modo headless oficial)
-# O binário é copiado de uma camada temporária para controle de versão preciso.
-# Dependências mínimas: libgcc_s, libm, libc (já presentes no python:3.12-slim)
+# A versão é controlada pelo operador: prepare-docker.sh copia o binário
+# instalado localmente (ex.: ~/.local/bin/kiro-cli) para kiro-cli no contexto
+# de build. Não existe instalador oficial com versão pinada por URL.
 # ---------------------------------------------------------------------------
-# Copia o binário para a imagem usando um placeholder — na prática o binário
-# pode ser obtido via instalador oficial ou download direto.
-# NOTA: substituir pela forma de distribuição oficial quando disponível.
-# Por ora usamos COPY para injetar o binário do host (ver .dockerignore).
-COPY --chown=root:root kiro-cli-bin /usr/local/bin/kiro-cli
+COPY --chown=root:root kiro-cli /usr/local/bin/kiro-cli
 RUN chmod 755 /usr/local/bin/kiro-cli
 
 # ---------------------------------------------------------------------------
@@ -65,12 +62,14 @@ RUN pip install --no-cache-dir pyyaml==6.0.2
 
 # ---------------------------------------------------------------------------
 # Logs em tempo real (RF-07, sugestão de arquitetura §5)
+# AC-04 da US-05: sem buffer, saída visível em `docker logs`
 # ---------------------------------------------------------------------------
 ENV PYTHONUNBUFFERED=1
 
 # ---------------------------------------------------------------------------
 # Código-fonte da esteira (RF-01)
 # pipe.yml e contexts/ NÃO são copiados — entram por volume em runtime (RF-05)
+# AC-05 de US-01 / ADR-05: execução como usuário não-root
 # ---------------------------------------------------------------------------
 USER pipe
 WORKDIR /app

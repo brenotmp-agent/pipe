@@ -15,3 +15,6 @@ pipe.yml
 
 # Código de referência (versão antiga)
 oldversion/
+
+# Binário kiro-cli copiado pelo prepare-docker.sh (contexto de build, não deve ser versionado)
+kiro-cli

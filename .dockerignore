@@ -1,0 +1,31 @@
+# .dockerignore — exclui do contexto de build arquivos desnecessários ou sensíveis
+
+# Segredos e configuração de runtime (entram por volume)
+pipe.yml
+contexts/
+.pipe/
+logs/
+repo/
+
+# Binários e dependências locais (não devem ser incluídos)
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Documentação (não é necessária na imagem)
+doc/
+README.md
+CONTEXT.md
+
+# Git
+.git/
+.gitignore
+
+# CI/CD e scripts de build (não são necessários na imagem)
+.github/
+
+# O binário kiro-cli É necessário no contexto de build (copiado pelo prepare-docker.sh)
+# kiro-cli  ← NÃO excluir
