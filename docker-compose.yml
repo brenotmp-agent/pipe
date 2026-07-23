@@ -3,7 +3,7 @@
 
 services:
   pipe:
-    image: pipe:latest
+    build: .
     env_file:
       - .env
     environment:
@@ -21,7 +21,8 @@ services:
       - kiro-local:/home/pipe/.local/share/kiro-cli
     secrets:
       - ssh_key
-    # restart, healthcheck, stop_grace_period -> US-05 (issue #20)
+    # Reinicia após crash ou reboot do host; para com docker compose stop (US-05)
+    restart: unless-stopped
 
 secrets:
   ssh_key:
