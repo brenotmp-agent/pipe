@@ -590,3 +590,31 @@ class TestConsistenciaComArtefatos:
             "Runbook não menciona que .env está no .gitignore / não deve ser versionado. "
             "US-06: o operador deve ser alertado sobre segurança do .env."
         )
+
+    def test_arquivos_referenciados_em_cp_existem(self, runbook_text):
+        """Todos os arquivos de origem referenciados em comandos 'cp <origem>' no runbook devem existir.
+
+        Evita o delírio de documentar 'cp pipe.yml.example pipe.yml' quando o arquivo
+        de exemplo não existe no repositório — o operador receberia um erro imediato
+        ao seguir o quickstart.
+
+        US-06 AC-03: cada instrução do runbook deve ser executável de ponta a ponta.
+        """
+        # Extrai caminhos de origem de comandos cp no runbook
+        # Padrão: cp <origem> <destino>  (captura apenas a origem)
+        origens = re.findall(r"\bcp\s+([\w./-]+)\s+[\w./-]+", runbook_text)
+        arquivos_inexistentes = []
+        for origem in origens:
+            # Ignora variáveis de shell e caminhos absolutos genéricos
+            if origem.startswith("$") or origem.startswith("/"):
+                continue
+            caminho = REPO_ROOT / origem
+            if not caminho.exists():
+                arquivos_inexistentes.append(origem)
+
+        assert not arquivos_inexistentes, (
+            f"Arquivo(s) referenciado(s) em comandos 'cp' no runbook não existem no repositório: "
+            f"{', '.join(arquivos_inexistentes)}. "
+            "US-06 AC-03: o quickstart deve ser executável de ponta a ponta sem erros — "
+            "todos os arquivos de origem em 'cp' devem existir."
+        )

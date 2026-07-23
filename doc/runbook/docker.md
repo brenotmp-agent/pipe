@@ -34,7 +34,7 @@ cp .env.example .env
 # Edite .env e preencha: GH_TOKEN, KIRO_API_KEY, SSH_KEY_FILE_HOST (e as demais variáveis)
 
 # 3. Criar o pipe.yml com a configuração da esteira
-cp pipe.yml.example pipe.yml  # ou criar manualmente conforme README
+# Crie manualmente na raiz do repositório conforme o README (não há arquivo de exemplo)
 
 # 4. Construir a imagem
 docker compose build
@@ -126,10 +126,14 @@ Para build manual (fora do compose), o comando equivalente é:
 
 ```bash
 DOCKER_BUILDKIT=1 docker build \
-  --secret id=ssh_key,src="$PIPE_SSH_KEY_FILE" \
+  --secret id=ssh_key,src="$SSH_KEY_FILE_HOST" \
   --build-arg PIPE_REF=main \
   -t esteira .
 ```
+
+> **Nota:** use `$SSH_KEY_FILE_HOST` (caminho da chave **no host**, definido no `.env`).
+> `PIPE_SSH_KEY_FILE` é o caminho interno do container (`/run/secrets/ssh_key`) e
+> não está disponível no ambiente do host.
 
 ---
 
