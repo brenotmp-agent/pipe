@@ -4,65 +4,23 @@
 services:
   pipe:
     image: pipe:latest
-
-    # ─── Variáveis de ambiente ─────────────────────────────────────────────────
     env_file:
       - .env
     environment:
       # Caminho INTERNO da chave SSH (determinado pelo compose, não pelo operador)
       - PIPE_SSH_KEY_FILE=/run/secrets/ssh_key
-
-      # Inibe cor nos logs do kiro-cli para facilitar parsing
-      - KIRO_LOG_NO_COLOR=1
-
-      # Fuso horário (opcional — ajuste conforme o ambiente)
-      - TZ=America/Sao_Paulo
-
-    # ─── Volumes ──────────────────────────────────────────────────────────────
     volumes:
-      # ── Estado de runtime (US-04 bind mounts configuráveis) ──────────────
-      # Variáveis com defaults inline garantem funcionamento sem .env (H-2:
-      # prevenção de efêmero por engano). Comente para não persistir no host.
-
-      # .pipe/ → snapshots de boards, sessões de agente, throttle.
-      # Se remover: re-sync completo no arranque + perde continuidade dos agentes.
-      - ${PIPE_STATE_DIR:-./.pipe}:/app/.pipe
-
-      # repo/ → clones git dos repositórios configurados.
-      # Se remover: re-clone de todos os repositórios a cada subida.
-      - ${PIPE_REPO_DIR:-./repo}:/app/repo
-
-      # logs/ → logs diários (JSON) e logs de execução dos agentes (MD).
-      # Se remover: perde histórico de execução. Operação segue normal.
-      - ${PIPE_LOGS_DIR:-./logs}:/app/logs
-
-      # ── Estado de runtime (US-03 named volumes — persistência validada) ──
-      # Named volumes para estado + kiro-cli (US-03 / ADR-07).
-      # Dois volumes para kiro-cli: kiro-home persiste configuração;
-      # kiro-local persiste índice SQLite necessário para --list-sessions e
-      # --resume-id (ADR-07, risco RA-1).
-      - pipe-state:/app/.pipe
-      - pipe-repo:/app/repo
-      - pipe-logs:/app/logs
-      - kiro-home:/home/pipe/.kiro
-      - kiro-local:/home/pipe/.local/share/kiro-cli
-
-      # ── Configuração (somente leitura — editar no host + 'docker compose up -d' = nova config SEM rebuild) ──
+      # Configuração: editar no host + 'docker compose up -d' = nova config SEM rebuild
       - ./pipe.yml:/app/pipe.yml:ro
       - ./contexts:/app/contexts:ro
-
-      # ── Credenciais ────────────────────────────────────────────────────────
-      # Chave SSH do host (somente leitura)
-      - ${SSH_KEY_FILE:-~/.ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
-      - ${SSH_KEY_FILE:-~/.ssh/id_ed25519}.pub:/root/.ssh/id_ed25519.pub:ro
-
-      # Configuração do gh CLI (autenticação — gerada por `gh auth login`)
-      - ${GH_CONFIG_DIR:-~/.config/gh}:/root/.config/gh:ro
-
-    # ─── Secrets ──────────────────────────────────────────────────────────────
+      # Estado de runtime (persistência validada em US-04 / issue #19)
+      - pipe-repo:/app/repo
+      - pipe-logs:/app/logs
+      - pipe-state:/app/.pipe
+      - kiro-home:/home/pipe/.kiro
+      - kiro-local:/home/pipe/.local/share/kiro-cli
     secrets:
       - ssh_key
-
     # restart, healthcheck, stop_grace_period -> US-05 (issue #20)
 
 secrets:
