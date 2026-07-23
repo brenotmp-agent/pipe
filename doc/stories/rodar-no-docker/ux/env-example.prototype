@@ -1,0 +1,43 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# PROTÓTIPO de .env — insumo de UX para US-03 (NÃO é o arquivo final)
+#
+# Esta é a "tela de setup" da esteira em modo headless: o único lugar onde o
+# operador declara as três credenciais. O foco deste protótipo é a COPY inline —
+# cada variável se explica sozinha (o quê, onde obter, escopo). US-03 produz o
+# .env.example real e o docker-compose.yml; use este arquivo como referência de
+# redação e agrupamento.
+#
+# Regras:
+#   • Copie para `.env` (o `.env` real NUNCA vai para o git — deve estar no
+#     .gitignore). Este protótipo não contém segredos.
+#   • Nenhum valor real aqui — apenas formato e exemplo.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── 1. SSH / git ─────────────────────────────────────────────────────────────
+# Caminho, DENTRO do container, do arquivo de chave privada SSH.
+# A chave é montada como Docker secret (read-only); o arranque a copia para
+# ~/.ssh/id_pipe e configura o SSH sozinho. Aponte para o ponto de montagem.
+# Obrigatória: validada no arranque — sem ela o container não sobe.
+PIPE_SSH_KEY_FILE=/run/secrets/ssh_key
+
+# ── 2. GitHub (board) ────────────────────────────────────────────────────────
+# Personal Access Token do GitHub, usado pelo gh CLI (sem `gh auth login`).
+# Escopos OBRIGATÓRIOS: repo, project  (o 'project' é necessário para mover
+# cards no GitHub Projects — sem ele, a esteira autentica mas não opera o board).
+# Onde gerar: https://github.com/settings/tokens
+GH_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# ── 3. kiro-cli (agente) ─────────────────────────────────────────────────────
+# API key do kiro-cli para autenticação headless (dispensa login por browser).
+# Requer assinatura Kiro Pro, Pro+, Pro Max ou Power.
+# Em conta gerenciada por admin, a geração de key precisa estar habilitada na
+# governança da organização (ver runbook — risco R-3).
+# Onde gerar: https://app.kiro.dev  →  Settings → API keys
+KIRO_API_KEY=kiro_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Depois de preencher:  docker compose up
+# Confira o arranque: o log deve mostrar "3/3 credenciais OK — modo headless
+# pronto". Se faltar alguma, o log diz qual e como corrigir. Guia completo em
+# doc/runbook/docker.md (US-06).
+# ─────────────────────────────────────────────────────────────────────────────
