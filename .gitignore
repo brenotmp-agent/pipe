@@ -13,6 +13,9 @@ venv/
 # Configuração local
 pipe.yml
 
+# Variáveis de ambiente (segredos — nunca versionar)
+.env
+
 # Código de referência (versão antiga)
 oldversion/
 
