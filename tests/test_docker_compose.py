@@ -1332,3 +1332,204 @@ class TestUS03IntegracaoCompose:
         finally:
             import os as _os
             _os.unlink(fake_key)
+
+
+# ---------------------------------------------------------------------------
+# US-05 AC-03 — Política de restart: unless-stopped
+# ---------------------------------------------------------------------------
+# Testa o critério de aceitação AC-03 da US-05 (#20): o serviço 'pipe' deve
+# declarar `restart: unless-stopped` no docker-compose.yml.
+#
+# Semântica da política:
+#   - Container reinicia automaticamente após crash ou reboot do host.
+#   - Container NÃO reinicia se parado manualmente com `docker compose stop`.
+#   - Sobrevive a `docker compose down` sem a flag -v (containers recriados
+#     ficam com restart ativo).
+#
+# Os testes abaixo são estáticos (sem subir container); o comportamento runtime
+# real (crash → reinício) não pode ser verificado sem subir o daemon.
+# ---------------------------------------------------------------------------
+
+
+class TestUS05AC03RestartPolicy:
+    """US-05 AC-03: restart: unless-stopped declarado no serviço 'pipe'.
+
+    Garante que o container reinicia automaticamente após crash ou reboot do
+    host, mas para normalmente com `docker compose stop` (sem loop infinito).
+    """
+
+    def test_restart_unless_stopped_declarado(self, compose_text):
+        """O serviço pipe deve declarar `restart: unless-stopped`."""
+        assert re.search(r"restart:\s*unless-stopped", compose_text), (
+            "'restart: unless-stopped' ausente no docker-compose.yml. "
+            "US-05 AC-03: o serviço pipe deve reiniciar automaticamente após "
+            "crash ou reboot do host. Adicionar 'restart: unless-stopped' no serviço."
+        )
+
+    def test_restart_no_servico_pipe(self, compose_text):
+        """restart: unless-stopped deve estar dentro da definição do serviço 'pipe', não em outro serviço."""
+        import yaml
+
+        try:
+            conteudo = yaml.safe_load(compose_text)
+        except Exception:
+            pytest.skip("YAML inválido — teste de posicionamento ignorado.")
+
+        services = conteudo.get("services", {})
+        assert "pipe" in services, (
+            "Serviço 'pipe' não encontrado — não é possível verificar restart policy."
+        )
+        pipe_service = services["pipe"]
+        assert "restart" in pipe_service, (
+            "Chave 'restart' ausente no serviço 'pipe'. "
+            "US-05 AC-03: 'restart: unless-stopped' deve estar definido no serviço pipe."
+        )
+        assert pipe_service["restart"] == "unless-stopped", (
+            f"Valor de 'restart' é '{pipe_service['restart']}' em vez de 'unless-stopped'. "
+            "US-05 AC-03: a política correta é 'unless-stopped' — reinicia após crash "
+            "mas respeita parada manual com `docker compose stop`."
+        )
+
+    def test_restart_policy_e_unless_stopped_nao_always(self, compose_text):
+        """A política de restart NÃO deve ser 'always' (não respeita parada manual).
+
+        'always' faria o container reiniciar mesmo após `docker compose stop`,
+        tornando impossível parar o serviço sem intervenção mais agressiva.
+        'unless-stopped' é a escolha correta: reinicia após crash/reboot mas
+        para com `docker compose stop` ou `docker stop`.
+        """
+        assert not re.search(r"restart:\s*always", compose_text), (
+            "restart: always encontrado no docker-compose.yml. "
+            "US-05 AC-03: usar 'restart: unless-stopped', não 'always'. "
+            "'always' não respeita `docker compose stop` — requer intervenção manual."
+        )
+
+    def test_restart_policy_e_unless_stopped_nao_on_failure(self, compose_text):
+        """A política de restart NÃO deve ser 'on-failure'.
+
+        'on-failure' reinicia apenas em saídas com código != 0 e NÃO reinicia
+        após reboot do host. 'unless-stopped' cobre ambos os casos (crash e
+        reboot) conforme especificado em US-05 AC-03.
+        """
+        assert not re.search(r"restart:\s*on-failure", compose_text), (
+            "restart: on-failure encontrado no docker-compose.yml. "
+            "US-05 AC-03: usar 'restart: unless-stopped'. "
+            "'on-failure' não reinicia após reboot do host."
+        )
+
+    def test_restart_policy_e_unless_stopped_nao_no(self, compose_text):
+        """A política de restart NÃO deve ser 'no' (desabilitaria o reinício automático)."""
+        # Verifica que não há "restart: no" explícito — o padrão sem restart é 'no',
+        # mas se declarado explicitamente é igualmente inválido para US-05 AC-03.
+        assert not re.search(r"restart:\s*\"?no\"?", compose_text), (
+            "restart: no encontrado no docker-compose.yml. "
+            "US-05 AC-03: usar 'restart: unless-stopped'. "
+            "'no' (padrão) desabilita o reinício automático."
+        )
+
+    def test_restart_nao_sobrescrito_em_ephemeral(self):
+        """compose.ephemeral.yml NÃO deve sobrescrever a política de restart.
+
+        O override efêmero deve ser mínimo (apenas volumes anônimos).
+        Sobrescrever restart no override efêmero removeria a garantia de US-05 AC-03
+        em ambientes que usam o override.
+        Nota: este teste já está em TestComposeEphemeral — reforça o vínculo com US-05.
+        """
+        if not COMPOSE_EPHEMERAL.exists():
+            pytest.skip("compose.ephemeral.yml não encontrado — skip.")
+        ephemeral_text = COMPOSE_EPHEMERAL.read_text(encoding="utf-8")
+        assert "restart:" not in ephemeral_text, (
+            "'restart:' encontrado no compose.ephemeral.yml. "
+            "US-05 AC-03: o override efêmero não deve sobrescrever a política de restart "
+            "definida no compose principal."
+        )
+
+    def test_env_example_nao_tem_restart_configuravel(self, env_example_text):
+        """restart: unless-stopped é fixo no compose — não deve ser configurável via .env.
+
+        Se restart fosse uma variável de ambiente, o operador poderia desabilitá-lo
+        acidentalmente. A política de reinício é decisão de design (US-05 AC-03),
+        não parâmetro operacional.
+        """
+        assert not re.search(r"RESTART_POLICY|COMPOSE_RESTART", env_example_text), (
+            "Variável de configuração de restart encontrada no .env.example. "
+            "US-05 AC-03: restart: unless-stopped é fixo no compose, "
+            "não deve ser configurável pelo operador via .env."
+        )
+
+
+class TestUS05AC03IntegracaoCompose:
+    """US-05 AC-03: validação da política de restart via 'docker compose config' (com Docker)."""
+
+    def test_restart_unless_stopped_no_config_resolvido(self):
+        """docker compose config deve mostrar restart: unless-stopped no serviço pipe."""
+        if not _docker_disponivel():
+            pytest.skip("Docker daemon não disponível.")
+
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as f:
+            f.write(b"fake-key")
+            fake_key = f.name
+
+        try:
+            env = dict(os.environ, SSH_KEY_FILE_HOST=fake_key)
+            result = subprocess.run(
+                ["docker", "compose", "-f", str(COMPOSE_FILE), "config"],
+                capture_output=True,
+                text=True,
+                cwd=str(REPO_ROOT),
+                env=env,
+            )
+            if result.returncode != 0:
+                pytest.skip(
+                    f"docker compose config falhou (exit {result.returncode}): {result.stderr}"
+                )
+            assert re.search(r"restart:\s*unless-stopped", result.stdout), (
+                "'restart: unless-stopped' ausente no output de 'docker compose config'. "
+                "US-05 AC-03: o Compose deve resolver a política de restart corretamente."
+            )
+        finally:
+            import os as _os
+            _os.unlink(fake_key)
+
+    def test_restart_unless_stopped_persiste_com_override_ephemeral(self):
+        """restart: unless-stopped deve persistir quando compose.ephemeral.yml é aplicado como override."""
+        if not _docker_disponivel():
+            pytest.skip("Docker daemon não disponível.")
+        if not COMPOSE_EPHEMERAL.exists():
+            pytest.skip("compose.ephemeral.yml não encontrado.")
+
+        import os
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(suffix=".pem", delete=False) as f:
+            f.write(b"fake-key")
+            fake_key = f.name
+
+        try:
+            env = dict(os.environ, SSH_KEY_FILE_HOST=fake_key)
+            result = subprocess.run(
+                [
+                    "docker", "compose",
+                    "-f", str(COMPOSE_FILE),
+                    "-f", str(COMPOSE_EPHEMERAL),
+                    "config",
+                ],
+                capture_output=True,
+                text=True,
+                cwd=str(REPO_ROOT),
+                env=env,
+            )
+            if result.returncode != 0:
+                pytest.skip(
+                    f"docker compose config com ephemeral falhou: {result.stderr}"
+                )
+            assert re.search(r"restart:\s*unless-stopped", result.stdout), (
+                "'restart: unless-stopped' perdida ao aplicar compose.ephemeral.yml. "
+                "US-05 AC-03: o override efêmero não deve sobrescrever a política de restart."
+            )
+        finally:
+            import os as _os
+            _os.unlink(fake_key)
