@@ -14,6 +14,10 @@ services:
       # Token do GitHub — preencha em .env ou exporte antes de subir
       GH_TOKEN: ${GH_TOKEN}
 
+      # API key do kiro-cli (modo headless — autenticação sem interatividade)
+      # Gere em: https://app.kiro.dev → API Keys
+      KIRO_API_KEY: ${KIRO_API_KEY}
+
       # Inibe cor nos logs do kiro-cli para facilitar parsing
       KIRO_LOG_NO_COLOR: "1"
 

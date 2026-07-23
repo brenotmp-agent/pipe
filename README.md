@@ -90,6 +90,7 @@ python -m src
 - `gh auth login` executado no host (gera `~/.config/gh/`)
 - Chave SSH configurada no GitHub (`~/.ssh/id_ed25519`)
 - Token do GitHub com escopos `repo` e `project`
+- API key do kiro-cli (plano Pro/Pro+ ou superior) — gere em https://app.kiro.dev → API Keys
 
 **1. Preparar o contexto de build (copia o binário kiro-cli):**
 
@@ -97,11 +98,15 @@ python -m src
 ./prepare-docker.sh
 ```
 
-**2. Criar o arquivo `.env` com o token do GitHub:**
+**2. Criar o arquivo `.env` com os tokens:**
 
 ```bash
 cp .env.example .env
-# Editar .env e preencher GH_TOKEN (e opcionalmente SSH_KEY_FILE, GH_CONFIG_DIR)
+# Editar .env e preencher:
+#   GH_TOKEN       — token do GitHub (repo + project)
+#   KIRO_API_KEY   — API key do kiro-cli (modo headless)
+#                    Gere em: https://app.kiro.dev → API Keys
+# Opcionais: SSH_KEY_FILE, GH_CONFIG_DIR
 ```
 
 **3. Garantir que o `pipe.yml` existe na raiz do projeto:**
