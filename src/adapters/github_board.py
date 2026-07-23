@@ -25,7 +25,7 @@ class GitHubBoardAdapter(BoardPort):
     _penalty_cooldown: datetime = None
 
     # Throttle
-    _throttle_value: int = 16
+    _throttle_value: int = 1
     _throttle_cooldown: datetime = None
     _throttle_file: str = ".pipe/throttle"
 
@@ -80,8 +80,13 @@ class GitHubBoardAdapter(BoardPort):
             self._throttle_cooldown = datetime.now() + timedelta(hours=1)
 
         if self._throttle_cooldown < datetime.now():
-            if self._throttle_value > 16:
+            if self._throttle_value > 1:
                 self._throttle_value //= 2
+                self._save_throttle()
+                log.info("GitHub", f"Throttle reduzido para {self._throttle_value}s (cooldown)")
+            elif self._throttle_value == 1:
+                # Último degrau: de 1 vai direto para 0 (sem throttle).
+                self._throttle_value = 0
                 self._save_throttle()
                 log.info("GitHub", f"Throttle reduzido para {self._throttle_value}s (cooldown)")
             self._throttle_cooldown = datetime.now() + timedelta(hours=1)
@@ -92,7 +97,11 @@ class GitHubBoardAdapter(BoardPort):
         if self._throttle_value >= 64:
             raise self._penalty_hit()
 
-        self._throttle_value = min(self._throttle_value * 2, 64)
+        if self._throttle_value == 0:
+            # Saindo do "sem throttle": primeiro degrau é 1.
+            self._throttle_value = 1
+        else:
+            self._throttle_value = min(self._throttle_value * 2, 64)
         self._throttle_cooldown = datetime.now() + timedelta(hours=1)
         self._save_throttle()
         log.info("GitHub", f"Throttle aumentado para {self._throttle_value}s")
@@ -473,8 +482,7 @@ class GitHubBoardAdapter(BoardPort):
             self._throttle()
             args = ["gh", "api", "-i", "graphql", "-f", f"query={query}"]
             for k, v in variables.items():
-                flag = "-F" if isinstance(v, (int, float, bool)) else "-f"
-                args += [flag, f"{k}={v}"]
+                args += self._field_arg(k, v)
 
             result = subprocess.run(args, capture_output=True, text=True)
             raw_output = result.stdout.strip()
@@ -572,6 +580,74 @@ class GitHubBoardAdapter(BoardPort):
             self._repo = self._repo.replace("git@github.com:", "").replace(".git", "")
         self._load_throttle()
         log.info("GitHub", f"Repositório: {self._repo} (throttle: {self._throttle_value}s)")
+
+    def check_access(self, config: dict) -> None:
+        """Valida acesso e permissão de escrita no repositório ANTES de rodar.
+
+        Usa chamadas diretas ao ``gh`` (sem passar por ``_gh``) para não acionar
+        o tratamento de rate limit/penalty durante a verificação de startup —
+        um 403 aqui significa "sem permissão", não "rate limit".
+
+        Levanta ``BoardAccessError`` quando:
+          - não há repositório configurado;
+          - o token não está autenticado;
+          - o repositório não existe ou é inacessível pelo token;
+          - o token não tem permissão de escrita (push/maintain/admin).
+        """
+        from src.core.board import BoardAccessError
+
+        if not self._repo:
+            raise BoardAccessError("Repositório não configurado em git.repo")
+
+        # 1. Usuário autenticado
+        who = subprocess.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True, text=True,
+        )
+        if who.returncode != 0:
+            raise BoardAccessError(
+                "Token do gh não autenticado ou inválido: "
+                + (who.stderr.strip() or "falha ao consultar /user")
+            )
+        login = who.stdout.strip()
+
+        # 2. Acesso e permissões no repositório
+        result = subprocess.run(
+            ["gh", "api", f"repos/{self._repo}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            err = result.stderr.strip() or result.stdout.strip()
+            raise BoardAccessError(
+                f"Sem acesso ao repositório '{self._repo}' como '{login}': {err}"
+            )
+
+        try:
+            data = json.loads(result.stdout)
+        except (ValueError, TypeError):
+            raise BoardAccessError(
+                f"Resposta inválida ao consultar repositório '{self._repo}'"
+            )
+
+        perms = data.get("permissions") or {}
+        can_write = bool(
+            perms.get("admin") or perms.get("maintain") or perms.get("push")
+        )
+        if not can_write:
+            level = next(
+                (name for name, key in (
+                    ("admin", "admin"), ("maintain", "maintain"),
+                    ("push", "push"), ("triage", "triage"), ("pull", "pull"),
+                ) if perms.get(key)),
+                "nenhuma",
+            )
+            raise BoardAccessError(
+                f"Token '{login}' não tem permissão de escrita em "
+                f"'{self._repo}' (nível atual: {level}). "
+                f"É necessário push, maintain ou admin."
+            )
+
+        log.info("GitHub", f"Permissões OK: '{login}' com escrita em '{self._repo}'")
 
     def sync_boards(self, boards: list[dict]) -> None:
         self._penalty_check()
@@ -771,17 +847,33 @@ class GitHubBoardAdapter(BoardPort):
         self._penalty_check()
         log.info("GitHub", f"[{self._throttle_value}s] {board_id} - Criando issue '{title}'",
                  operation="create_issue", board_id=board_id, title=title)
+        # 'gh issue create' NÃO suporta --json; ele imprime a URL da issue
+        # criada no stdout (ex.: https://github.com/owner/repo/issues/42).
         result = self._gh("issue", "create", "--repo", self._repo,
-                          "--title", title, "--body", body, "--json", "number,title,body,updatedAt")
-        data = json.loads(result)
-        issue_id = str(data["number"])
+                          "--title", title, "--body", body)
+        issue_url = result.strip().splitlines()[-1].strip() if result.strip() else ""
+        issue_id = issue_url.rstrip("/").split("/")[-1]
+        if not issue_id.isdigit():
+            raise Exception(
+                f"Não foi possível extrair o número da issue da saída de 'gh issue create': {result!r}"
+            )
+        # Buscar node_id e updatedAt em uma única query GraphQL.
+        info = self._gql(
+            "query($owner:String!,$repo:String!,$number:Int!){repository(owner:$owner,name:$repo){issue(number:$number){id updatedAt}}}",
+            owner=self._repo.split("/")[0],
+            repo=self._repo.split("/")[1],
+            number=int(issue_id),
+        )
+        issue_node = (info.get("repository") or {}).get("issue") or {}
+        node_id = issue_node.get("id")
+        updated_at = issue_node.get("updatedAt", "")
         # Adicionar ao project e mover para coluna
         meta = self._board_meta(board_id)
         # Adicionar issue ao project
         add_data = self._gql(
             "mutation($pid:ID!,$contentId:ID!){addProjectV2ItemById(input:{projectId:$pid,contentId:$contentId}){item{id}}}",
             pid=meta["project_id"],
-            contentId=self._get_issue_node_id(issue_id),
+            contentId=node_id,
         )
         item_id = add_data["addProjectV2ItemById"]["item"]["id"]
         # Mover para coluna correta
@@ -794,7 +886,7 @@ class GitHubBoardAdapter(BoardPort):
             )
         return Issue(
             id=issue_id, title=title, body=body, column=column,
-            updated_at=data.get("updatedAt", ""),
+            updated_at=updated_at,
         )
 
     def _get_issue_node_id(self, issue_id: str) -> str:
@@ -839,8 +931,90 @@ class GitHubBoardAdapter(BoardPort):
                 return item["id"]
         return None
 
+    # ── Validação de pertinência (isolamento de IDs entre boards) ────────────
+    #
+    # Correção 5 — Incidente Issue Fantasma:
+    #   O espaço de números de issues no GitHub é compartilhado entre todos os
+    #   boards do repositório. Uma operação destrutiva num board "story" poderia
+    #   fechar/alterar issues do board "epic" que coincidissem numericamente.
+    #
+    #   Antes de qualquer operação destrutiva (close_issue, update_issue) esta
+    #   validação é executada: consulta-se via GraphQL os projectItems da issue
+    #   e verifica-se se o project_id do board alvo está entre eles.
+    #
+    #   Impacto em rate limit: +1 chamada GraphQL por operação destrutiva.
+    #   Em cenários de board ativo com 10 closes/minuto, isso representa ~10
+    #   chamadas GraphQL adicionais por minuto — dentro da quota padrão de
+    #   5000 pontos/hora do GitHub GraphQL.
+
+    _BELONGS_QUERY = """
+query($owner:String!,$repo:String!,$number:Int!){
+  repository(owner:$owner,name:$repo){
+    issue(number:$number){
+      projectItems(first:10){
+        nodes{
+          project{ id }
+        }
+      }
+    }
+  }
+}"""
+
+    def _belongs_to_board(self, board_id: str, issue_id: str) -> bool:
+        """Verifica se a issue de number `issue_id` pertence ao projeto associado a `board_id`.
+
+        Consulta os projectItems da issue via GraphQL e compara o project.id
+        retornado com o project_id do board alvo (meta["project_id"]).
+
+        Retorna True se o board alvo está entre os projetos da issue.
+        Retorna False se a issue não pertence a nenhum projeto ou não pertence
+        ao board alvo.
+        """
+        meta = self._board_meta(board_id)
+        project_id = meta["project_id"]
+        owner, repo = self._repo.split("/")
+
+        data = self._gql(
+            self._BELONGS_QUERY,
+            owner=owner,
+            repo=repo,
+            number=int(issue_id),
+        )
+
+        nodes = (
+            (data.get("repository") or {})
+            .get("issue", {})
+            .get("projectItems", {})
+            .get("nodes", [])
+        )
+
+        return any(
+            (node.get("project") or {}).get("id") == project_id
+            for node in nodes
+        )
+
+    def _assert_belongs_to_board(self, board_id: str, issue_id: str) -> bool:
+        """Valida pertinência e loga warning se não pertencer.
+
+        Retorna True se a operação deve prosseguir, False se deve ser abortada.
+        """
+        if not self._belongs_to_board(board_id, issue_id):
+            log.warning(
+                "GitHub",
+                f"[{board_id}] #{issue_id} não pertence a este board — operação abortada",
+                operation="pertinencia_check",
+                board_id=board_id,
+                issue_id=issue_id,
+            )
+            return False
+        return True
+
     def update_issue(self, board_id: str, issue_id: str, title: str = None, body: str = None) -> None:
         self._penalty_check()
+        # Valida pertinência antes de qualquer escrita — impede atualização
+        # de issues de outro board que coincidam numericamente (Correção 5).
+        if not self._assert_belongs_to_board(board_id, issue_id):
+            return
         log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - Atualizando issue",
                  operation="update_issue", board_id=board_id, issue_id=issue_id)
         args = ["issue", "edit", issue_id, "--repo", self._repo]
@@ -870,6 +1044,10 @@ class GitHubBoardAdapter(BoardPort):
 
     def close_issue(self, board_id: str, issue_id: str) -> None:
         self._penalty_check()
+        # Valida pertinência antes de fechar — impede fechamento de issues de
+        # outro board que coincidam numericamente (Correção 5 — Incidente Issue Fantasma).
+        if not self._assert_belongs_to_board(board_id, issue_id):
+            return
         log.info("GitHub", f"[{self._throttle_value}s] #{issue_id} - Fechando issue",
                  operation="close_issue", board_id=board_id, issue_id=issue_id)
         self._gh("issue", "close", issue_id, "--repo", self._repo)
@@ -894,13 +1072,28 @@ class GitHubBoardAdapter(BoardPort):
         db_id = issue.get("fullDatabaseId")
         return int(db_id) if db_id else None
 
+    @staticmethod
+    def _field_arg(key, value) -> list[str]:
+        """Serializa um campo para o ``gh api``.
+
+        Usa ``-F`` (typed) para bool/int/float e ``-f`` (string) para o resto.
+        Booleanos são emitidos como os literais JSON ``true``/``false``: o gh só
+        reconhece a conversão mágica com literais minúsculos, então ``str(True)``
+        == ``"True"`` seria enviado como string e rejeitado pela API
+        (ex.: ``Invalid property /replace_parent: "True" is not of type boolean``).
+        """
+        if isinstance(value, bool):
+            return ["-F", f"{key}={'true' if value else 'false'}"]
+        if isinstance(value, (int, float)):
+            return ["-F", f"{key}={value}"]
+        return ["-f", f"{key}={value}"]
+
     def _api(self, method: str, path: str, **fields) -> str:
         """Chama a REST API via gh api (método + path + campos -f/-F)."""
         args = ["api", "-X", method,
                 "-H", "Accept: application/vnd.github+json", path]
         for k, v in fields.items():
-            flag = "-F" if isinstance(v, (int, float, bool)) else "-f"
-            args += [flag, f"{k}={v}"]
+            args += self._field_arg(k, v)
         return self._gh(*args)
 
     # ── Sub-issues (parent / children) ────────────────────────────────────────

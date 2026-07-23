@@ -15,6 +15,15 @@ class PenaltyException(Exception):
         super().__init__(f"Rate limit - aguardar {wait_seconds}s")
 
 
+class BoardAccessError(Exception):
+    """Token sem permissão/acesso suficiente para operar o board/repositório.
+
+    Levantada na verificação de startup: a esteira NÃO deve iniciar quando o
+    token não consegue operar o repositório configurado.
+    """
+    pass
+
+
 class SyncEvent(str, Enum):
     """Evento de sincronismo registrado na fila de mudanças.
 
@@ -94,6 +103,15 @@ class BoardPort(ABC):
     def connect(self, config: dict) -> None:
         """Conecta ao serviço."""
         pass
+
+    def check_access(self, config: dict) -> None:
+        """Verifica permissões/acesso antes de iniciar a esteira.
+
+        Implementação padrão: sem verificação (no-op). Adapters devem
+        sobrescrever e levantar BoardAccessError quando o token não puder
+        operar o repositório/board configurado.
+        """
+        return None
 
     @abstractmethod
     def sync_boards(self, boards: list[dict]) -> None:
@@ -216,6 +234,13 @@ class Board:
 
     def connect(self, config: dict):
         self._port.connect(config)
+
+    def check_access(self, config: dict):
+        """Delega a verificação de acesso/permissões ao port.
+
+        Levanta BoardAccessError quando o token não pode operar o board.
+        """
+        self._port.check_access(config)
 
     def sync_boards(self, config: dict):
         """Extrai boards do config e sincroniza via port."""

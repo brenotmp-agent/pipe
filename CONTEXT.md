@@ -62,7 +62,7 @@ main()
 └── while running:
     ├── board_full_sync()    # Re-executa se mudou o dia (daily full sync)
     ├── sync_board() → bool  # True se houve movimentação (up ou down)
-    ├── keep_task() → task | None
+    ├── keep_task() → task | AUTO_ADVANCED | None
     ├── call_agent()         # Resolve adapter, build_prompt, executa
     └── sleep_time()         # Dorme se !had_changes AND task==None
 ```
@@ -109,8 +109,9 @@ Gatilhos para `change-down`:
 
 Cada `ChangeItem` tem um booleano `fullsync` (default `False`):
 - `fullsync=True` → reconcilia **todas** as propriedades + dependências
-  (blocked_by/blocks, que só existem via REST). Usado em todo create e no
-  full sync diário.
+  (blocked_by/blocks, que só existem via REST). Usado em todo create, no
+  full sync diário e na **recuperação de pendências no startup** (toda
+  mudança detectada/recuperada em `board_full_sync` sobe como fullsync).
 - `fullsync=False` → apenas a chamada única de propriedades (sem deps). Usado
   em `change-down` incremental.
 - **Upgrade (superset)**: se um item equivalente já está na fila sem fullsync
@@ -169,6 +170,30 @@ alvo já está coerente, nada é enfileirado — evitando reação em cadeia inf
 O estado desejado/real é sempre gravado no snapshot **antes** de disparar o
 gatilho. Alvos não rastreados no snapshot são ignorados.
 
+### Resolução automática de bloqueios (blocked_by/blocks)
+
+Uma issue com `/blocked_by` ou `/blocks` no body é tratada como bloqueada por
+`keep_task` (não avança). Como o GitHub **mantém a dependência mesmo com a
+issue bloqueadora fechada** e **remover a dependência não altera o
+`updated_at`** da issue (logo não é detectada como `change-down`), três
+mecanismos garantem que bloqueios obsoletos sejam limpos:
+
+1. **Ao arquivar** (`/archive` no body **ou** coluna de destino com
+   `on_in:[archive]`): antes de arquivar, `_apply_change_up` **zera**
+   `blocked_by`/`blocks` da issue. A remoção gera deltas que disparam o
+   gatilho recíproco → cada issue vinculada recebe um `change-down fullsync` e
+   reconcilia seu estado (desbloqueando-se).
+
+2. **Ao deletar** (`delete-up` **ou** `delete-down`):
+   `_cleanup_block_relations_on_delete` percorre as issues apontadas pela
+   deletada (via `blocks`/`blocked_by`), remove o vínculo recíproco no board
+   (`set_blocked_by`/`set_blocks`), atualiza o snapshot do alvo e enfileira um
+   `change-down fullsync` para ele.
+
+3. **Na inicialização**: toda mudança detectada/recuperada em
+   `board_full_sync` é `fullsync=True`, reconciliando as dependências (ver
+   flag `fullsync`).
+
 ### Throttle
 
 Toda requisição respeita o throttle. `_get_rate_limit_info` chama
@@ -176,6 +201,14 @@ Toda requisição respeita o throttle. `_get_rate_limit_info` chama
 dentro de `_handle_rate_limit`, que já roda dentro de `_gh`/`_gql` — causaria
 recursão). As demais chamadas `subprocess.run` ficam dentro de `_gh`/`_gql`,
 sempre após `_throttle()`.
+
+Escala do valor (segundos): `0, 1, 2, 4, ... 64`.
+- **Aumento** (`_throttle_hit`, secondary rate limit): dobra até o teto `64`;
+  se estiver em `0`, sobe para `1`. Em `64` e ainda falhando → `penalty`.
+- **Redução** (`_throttle`, cooldown de 1h sem problemas): divide por 2; ao
+  chegar em `1`, cai para `0` (sem espera). Em `0` permanece `0`.
+- `_load_throttle` só restaura o valor persistido quando ele é **maior** que o
+  atual (não rebaixa após reinício).
 
 ### Detecção de rate limit por transporte (não pelo corpo)
 
@@ -199,11 +232,18 @@ Cobertura em `tests/test_rate_limit_detection.py`.
 ## Seleção de Tarefas (keep_task)
 
 - Boards ordenados por prioridade (menor = mais prioritário)
-- Issues ordenadas por `created_at` / `updated_at` (mais antiga primeiro)
-- Auto-advance: coluna `todo` → próxima coluna (apenas move arquivos, sync propaga)
+- Dentro do board, varredura coluna a coluna: da última coluna para a primeira (`backlog`/`todo` por último)
+- Dentro de cada coluna, seleciona a mais antiga elegível (`created_at` / `updated_at`)
+- Retorno tri-estado:
+  - `dict` → tarefa elegível para execução imediata (`call_agent`)
+  - `AUTO_ADVANCED` → nenhuma tarefa pronta, mas uma issue do `todo` foi avançada; o loop **mantém o board atual** e força um novo `sync_board` + `process_queue` (não avança de board nem reinicia em 0)
+  - `None` → nada a fazer neste board; o loop avança para o próximo
+- Auto-advance: coluna `todo` → próxima coluna; só dispara se nenhuma coluna posterior tiver tarefa elegível. Move os 3 arquivos, atualiza o snapshot (marca `status=change-up`, `body_path` na nova coluna, `column` permanece a de origem) e **enfileira o `change-up`** na ChangeQueue para o sync propagar ao board
 - `parallel: false` → bloqueia auto-advance se issue ativa fora de terminais
 - Elegível: `status == "ok"` + coluna com `agent` + coluna com `change.advance`
-- Bloqueada: `/need_human` ou `/blocked_by` no body
+- Bloqueada: `/need_human` ou `/blocked_by` no body (bloqueios obsoletos são
+  limpos automaticamente ao arquivar/deletar — ver *Resolução automática de
+  bloqueios*)
 
 ## Execução de Agentes
 
@@ -217,9 +257,13 @@ Cobertura em `tests/test_rate_limit_detection.py`.
 | `create-merge` | Git Setup (criar) + Commit & Push + PR + Cleanup |
 | `no-branch` | Nenhum bloco de git |
 
-### Override de model/effort
+### Substituição de agente por nível (`override-agent`)
 
-Precedência: agente (default) < coluna (`effort`) < tag `/effort` no body (se `allow-overwrite: true`)
+A coluna tem um `agent` default. Se a issue traz `/agent_level <nível>` no bloco
+`@---` e `<nível>` é chave de `override-agent`, usa o agente do valor; senão, o
+`agent` default. Como cada agente carrega o próprio `model`, a troca de agente
+também troca o model. Resolvido em `agent.py` (`agent_level` +
+`resolve_agent_id`), validado em `config.py`.
 
 ### Contexto do agente
 
@@ -243,7 +287,7 @@ continua de onde parou em vez de recomeçar do zero.
 - **Chave por agente**: `<board>/<issue>/<agente>`. O mesmo agente atuando em
   colunas diferentes retoma o próprio raciocínio; agentes distintos nunca
   herdam a sessão um do outro. O agente da chave é o **resolvido**
-  (`resolve_agent_id`, considera override por `/effort`).
+  (`resolve_agent_id`, considera override por `/agent_level`).
 - **Retomar**: antes de executar, se há `session_id` conhecido e ele **ainda
   existe** no kiro-cli (`--list-sessions` do cwd), passa `--resume-id <id>`.
 - **Capturar**: após executar, pega o id da sessão mais recente do cwd
@@ -268,7 +312,7 @@ Detalhes técnicos verificados no kiro-cli:
 ### Log de execução
 
 Gerado em `<log.dir>/<issue_id>/<timestamp>.md` com 3 seções:
-- **Parâmetros**: plataforma, agente, model, effort, board, coluna, issue, context
+- **Parâmetros**: plataforma, agente, model, agent_level, board, coluna, issue, context
 - **Prompt**: prompt completo montado por `build_prompt`
 - **Chat**: diálogo (preenchido durante execução)
 
@@ -312,11 +356,12 @@ boards:
       <id-column>:
         name: <nome>
         agent: <id-agent>
-        effort: low|medium|high
+        override-agent: {<nível>: <id-agent>}
         gitevents: create|use|merge|create-merge|no-branch
-        target-prompt: <objetivo da etapa>
-        allow-overwrite: true|false
+        prompt: <objetivo da etapa>
         archive: true|false
+        on_in: [<token>, ...]
+        on_out: [<token>, ...]
         change:
           advance: <id-column>
           <condition>: <id-column>
@@ -345,7 +390,7 @@ Módulo `src/core/commands.py`. O body de uma issue pode terminar com um bloco
 de comandos separado por uma linha `@---`.
 
 - `IssueCommands`: dataclass com parent, children[], blocked_by[], blocks[],
-  labels[], effort, close, archive, need_human.
+  labels[], agent_level, close, archive, need_human.
 - `split_body(raw)` → `(body_limpo, IssueCommands)`. Múltiplos `@---`: o último
   vence, anteriores removidos.
 - `compose_body(body, cmds)` → body completo com bloco.
@@ -427,6 +472,70 @@ Os campos de estado (`labels`, `parent`, `children`, `blocked_by`, `blocks`,
 no fluxo up e para a checagem de par recíproco. São gravados em todo evento
 up (estado desejado) e down (estado real do board). `status` é o campo de
 sincronismo (crash recovery), distinto de `state` (open/closed da issue).
+
+## Robustez e Segurança do Estado (v1.5.0 — Incidente "Issue Fantasma")
+
+Pacote de correções derivado do incidente "Issue Fantasma" (registro completo
+em `doc/incidente/issue-fantasma/ticket.md`). O incidente teve causa raiz
+tripla: (1) agente com escrita irrestrita ao estado interno; (2) prefixo
+numérico no nome de arquivo interpretado como ID de issue real; (3) ausência de
+tratamento para "issue inexistente" combinada com fila *at-least-once*. As
+issues reais #1, #2, #3 (épicos) foram fechadas indevidamente por colisão de
+número no espaço compartilhado de IDs do repositório.
+
+Quatro correções foram entregues nesta release. A Correção 4 (validação
+pós-agente por comparação de mtime) **não** foi implementada.
+
+### Correção 2 — CONTEXT.md gerado no startup (`context_generator.py`)
+
+`generate_context(config)` roda em `startup()` (`src/__main__.py`) e gera dois
+arquivos a partir do `pipe.yml`:
+
+- `.pipe/CONTEXT.md` — instruções em Markdown.
+- `.kiro/agents/pipe_context.json` — agente kiro-cli (`tools: ["*"]`,
+  `allowedTools: ["@builtin"]`) com o mesmo conteúdo no campo `prompt`.
+
+Regeneração: recria se o arquivo não existir OU se `pipe.yml.mtime >
+CONTEXT.md.mtime`. O conteúdo tem quatro blocos: restrições de sistema (arquivos
+protegidos), regras de nomeação de issue (`<slug>-body.md` sem prefixo
+numérico), tabela de boards/colunas e git flow/branches.
+
+Injeção: o adapter `kiro_cli_agent.py` passa `--agent pipe_context` (nunca
+inline no prompt) e exporta `KIRO_HOME=<esteira>/.kiro` para o kiro-cli localizar
+o agente gerado (o cwd do processo é `repo/<repo_id>`, então sem `KIRO_HOME` o
+kiro-cli buscaria agentes no diretório errado).
+
+> Distinto do `CONTEXT.md` da raiz (este arquivo, técnico e manual). O gerado
+> fica em `.pipe/` e é sobrescrito a cada restart.
+
+### Correção 1 — Estado interno read-only para o agente (`agent.py`)
+
+`PROTECTED_PATHS` (glob) centraliza os arquivos de estado interno:
+`.pipe/boards/*/snapshot.json`, `.pipe/changeQueue.json`, `.pipe/throttle.json`,
+`.pipe/throttle-*.json`. `build_prompt` chama `_assert_no_protected(prompt)`,
+que tokeniza o prompt e casa cada token contra os padrões (fnmatch + match de
+sufixo para paths absolutos). Se algum padrão aparecer, levanta `ValueError` —
+o path do snapshot nunca chega ao agente. O `CONTEXT.md` gerado reforça a regra
+em linguagem natural.
+
+### Correção 3 — Tratamento de erro irrecuperável no sync (`sync.py`)
+
+`_apply_change_up` e `_apply_delete_up` capturam a exceção cujo texto contém
+`Could not resolve to an issue or pull request` (issue inexistente no GitHub):
+logam warning `removendo do snapshot (issue fantasma)`, removem a entrada do
+snapshot e **retornam** (descartam o evento) em vez de propagá-lo. Sem esse
+tratamento, a fila *at-least-once* re-enfileirava o evento a cada ciclo
+(loop na v1.4.2; crash-loop na base atual, sem o `except Exception` amplo).
+Qualquer outra exceção continua propagando.
+
+### Correção 5 — Isolamento de IDs entre boards (`github_board.py`)
+
+Antes de `update_issue` e `close_issue`, `_assert_belongs_to_board` chama
+`_belongs_to_board`, que consulta via GraphQL os `projectItems` da issue e
+confirma que o `project_id` do board alvo está entre eles. Se não pertencer, a
+operação é abortada com warning `não pertence a este board — operação abortada`
+e o método retorna sem efeito. Custo: +1 chamada GraphQL por operação
+destrutiva (dentro da quota de 5000 pontos/hora).
 
 ## Pendências
 

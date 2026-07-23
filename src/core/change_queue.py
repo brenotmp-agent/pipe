@@ -97,6 +97,14 @@ class ChangeQueue:
             self._write(items)
         return added
 
+    def size(self) -> int:
+        """Retorna a quantidade de itens na fila."""
+        return len(self._read())
+
+    def has_board(self, board_id: str) -> bool:
+        """Retorna True se há pelo menos um item para o board informado."""
+        return any(item.board == board_id for item in self._read())
+
     def getNext(self) -> ChangeItem | None:
         """Espia o item mais antigo da fila sem removê-lo (FIFO).
 

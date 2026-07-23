@@ -30,7 +30,20 @@ def _issue_files(board_id: str, col_id: str, issue_id: str, slug: str) -> dict:
 
 
 def _find_issue_files(board_id: str, issue_id: str) -> Path | None:
-    """Encontra o arquivo body de uma issue em qualquer coluna do board."""
+    """Encontra o arquivo body de uma issue em qualquer coluna do board.
+
+    Prioriza o path registrado no snapshot para evitar retornar um arquivo
+    órfão quando há colisão de IDs.
+    """
+    # Primeiro, verificar se o snapshot possui body_path registrado.
+    snap = Snapshot(board_id).load()
+    issue_data = snap.issue(issue_id)
+    if issue_data and issue_data.get("body_path"):
+        candidate = Path(issue_data["body_path"])
+        if candidate.exists():
+            return candidate
+
+    # Fallback: rglob
     board_dir = BOARDS_DIR / board_id
     if not board_dir.exists():
         return None
@@ -61,6 +74,14 @@ def _fire_column_events(board_id: str, issue_id: str, board_obj: Board,
     if in_events:
         log.info("Sync", f"[{board_id}] #{issue_id} on_in '{new_col}': {in_events}")
         board_obj.apply_column_events(board_id, issue_id, in_events)
+
+
+def _column_archives(board_id: str, col_id: str, config: dict) -> bool:
+    """True se a coluna arquiva ao entrar (on_in contém o evento 'archive')."""
+    if not config or not col_id:
+        return False
+    columns = (config.get("boards", {}).get(board_id, {}) or {}).get("columns", {})
+    return "archive" in ((columns.get(col_id, {}) or {}).get("on_in") or [])
 
 
 def _compose_down_body(issue: Issue) -> str:
@@ -206,6 +227,54 @@ def _trigger_reciprocal_downs(source_id: str, deltas: dict, queue) -> None:
                              f"removido por #{source_id})")
 
 
+def _cleanup_block_relations_on_delete(deleted_id: str, deleted_data: dict,
+                                       board_obj: Board, queue) -> None:
+    """Remédio 2: ao deletar (up/down) uma issue, remove os vínculos de bloqueio
+    recíprocos das issues apontadas por ela (em qualquer board) e as enfileira
+    para fullsync (bloqueio removido).
+
+    A issue deletada aponta:
+      - blocks ∋ Y      → Y.blocked_by ∋ deletada  → remove deletada de Y.blocked_by
+      - blocked_by ∋ Z  → Z.blocks ∋ deletada      → remove deletada de Z.blocks
+
+    Para cada alvo ainda vinculado, remove o vínculo no board (set_*) e enfileira
+    um change-down fullsync para reconciliar o estado local.
+    """
+    if not deleted_data or queue is None:
+        return
+    deleted_id = str(deleted_id)
+
+    # (relação na deletada, relação recíproca no alvo)
+    plan = (
+        ("blocks", "blocked_by"),   # alvos que a deletada bloqueava
+        ("blocked_by", "blocks"),   # alvos que bloqueavam a deletada
+    )
+    for rel, reciprocal_rel in plan:
+        for target_id in [str(x) for x in (deleted_data.get(rel) or [])]:
+            found = _find_snapshot_issue(target_id)
+            if not found:
+                continue  # alvo não rastreado - ignora
+            t_board, _ = found
+            t_snap = Snapshot(t_board).load()
+            t_data = t_snap.issue(target_id)
+            if not t_data:
+                continue
+            current = [str(x) for x in (t_data.get(reciprocal_rel) or [])]
+            if deleted_id not in current:
+                continue  # já não há vínculo recíproco
+            new_vals = [x for x in current if x != deleted_id]
+            if reciprocal_rel == "blocked_by":
+                board_obj.set_blocked_by(t_board, target_id, new_vals, known_current=current)
+            else:
+                board_obj.set_blocks(t_board, target_id, new_vals, known_current=current)
+            t_data[reciprocal_rel] = new_vals
+            t_snap.save()
+            queue.add(ChangeItem.of(SyncEvent.CHANGE_DOWN, id=target_id,
+                                    board=t_board, fullsync=True))
+            log.info("Sync", f"[{t_board}] #{target_id} bloqueio removido "
+                     f"(issue #{deleted_id} deletada)")
+
+
 def _deps_deltas_from_snapshot(issue, issue_data: dict) -> dict:
     """Calcula deltas de blocked_by/blocks entre issue (board) e snapshot.
 
@@ -275,12 +344,24 @@ def detect_local_changes(board_id: str, queue: ChangeQueue):
     board_dir = BOARDS_DIR / board_id
     snapshot_by_id = {str(i["id"]): i for i in snap.issues if i.get("id")}
 
+    # Conjunto de body_paths registrados no snapshot (para resolver colisões).
+    snapshot_paths = {Path(i["body_path"]).resolve()
+                      for i in snap.issues if i.get("body_path")}
+
     # Scan de arquivos body locais
     local_bodies = {}  # id -> Path
     for body_file in board_dir.rglob("*-body.md"):
         match = re.match(r"^(\d+)-", body_file.name)
         if match:
-            local_bodies[match.group(1)] = body_file
+            issue_id = match.group(1)
+            # Em caso de colisão (dois arquivos com mesmo ID numérico),
+            # priorizar o que já está registrado no snapshot.
+            if issue_id in local_bodies:
+                if body_file.resolve() in snapshot_paths:
+                    local_bodies[issue_id] = body_file
+                # senão, manter o que já está (pode ser o do snapshot)
+            else:
+                local_bodies[issue_id] = body_file
         elif body_file.name.count("-") >= 2:
             # Arquivo sem id numérico = issue criada localmente (sem id)
             body_path_str = str(body_file)
@@ -351,13 +432,14 @@ def detect_local_changes(board_id: str, queue: ChangeQueue):
 # apply_changes - persiste mudanças da fila
 # ══════════════════════════════════════════════════════════════════════════════
 
-def apply_changes(board_id: str, board_obj: Board, queue: ChangeQueue, config: dict = None):
-    """Consome a fila e aplica mudanças. Para no primeiro PenaltyException."""
+def apply_changes(board_obj: Board, queue: ChangeQueue, config: dict = None):
+    """Consome toda a fila e aplica mudanças. Para no primeiro PenaltyException."""
     while True:
         item = queue.getNext()
-        if not item or item.board != board_id:
+        if not item:
             return
 
+        board_id = item.board
         try:
             if item.event == SyncEvent.CREATE_UP.value:
                 _apply_create_up(board_id, item, board_obj, queue)
@@ -368,9 +450,9 @@ def apply_changes(board_id: str, board_obj: Board, queue: ChangeQueue, config: d
             elif item.event == SyncEvent.CHANGE_DOWN.value:
                 _apply_change_down(board_id, item, board_obj, queue, config)
             elif item.event == SyncEvent.DELETE_UP.value:
-                _apply_delete_up(board_id, item, board_obj)
+                _apply_delete_up(board_id, item, board_obj, queue)
             elif item.event == SyncEvent.DELETE_DOWN.value:
-                _apply_delete_down(board_id, item, board_obj)
+                _apply_delete_down(board_id, item, board_obj, queue)
 
             queue.remove(item.uuid)
         except PenaltyException:
@@ -520,8 +602,31 @@ def _apply_change_up(board_id: str, item: ChangeItem, board_obj: Board,
     # Separar comandos do body real
     body, cmds = split_body(raw_body)
 
+    # Remédio 1: se a issue está sendo arquivada (comando /archive no body OU
+    # coluna de destino com on_in:[archive]), remove TODOS os bloqueios antes
+    # de arquivar. A remoção produz deltas 'removed' em blocked_by/blocks e o
+    # _trigger_reciprocal_downs (ao final desta função) enfileira um fullsync
+    # (change-down) para cada issue reciprocamente vinculada — desbloqueando-as.
+    dest_col = _col_from_path(body_path, board_id)
+    if (cmds.archive or _column_archives(board_id, dest_col, config)) \
+            and (cmds.blocked_by or cmds.blocks):
+        log.info("Sync", f"[{board_id}] #{item.id} arquivando: removendo bloqueios "
+                 f"(blocked_by={cmds.blocked_by}, blocks={cmds.blocks})",
+                 issue_id=item.id)
+        cmds.blocked_by = []
+        cmds.blocks = []
+
     # Atualizar body/title no board (body limpo, sem o bloco @---)
-    board_obj.update_issue(board_id, item.id, title=title, body=body)
+    try:
+        board_obj.update_issue(board_id, item.id, title=title, body=body)
+    except Exception as e:
+        if "Could not resolve to an issue or pull request" in str(e):
+            log.warning("Sync", f"[{board_id}] #{item.id} não existe no GitHub — "
+                        "removendo do snapshot (issue fantasma)")
+            snap.issues = [i for i in snap.issues if str(i.get("id")) != str(item.id)]
+            snap.save()
+            return
+        raise
 
     # Aplicar comandos como estado autoritativo, comparando contra o estado
     # conhecido (snapshot): só chama o setter do atributo que realmente mudou,
@@ -686,9 +791,26 @@ def _bake_column_events(board_id: str, body_path: Path, config: dict,
              out_events=out_events, in_events=in_events)
 
 
-def _apply_delete_up(board_id: str, item: ChangeItem, board_obj: Board):
+def _apply_delete_up(board_id: str, item: ChangeItem, board_obj: Board,
+                     queue: ChangeQueue = None):
     """Fecha issue no board (arquivo local já foi removido)."""
-    board_obj.close_issue(board_id, item.id)
+    # Captura as relações da issue ANTES de removê-la do snapshot (Remédio 2).
+    deleted_data = Snapshot(board_id).load().issue(item.id)
+
+    try:
+        board_obj.close_issue(board_id, item.id)
+    except Exception as e:
+        if "Could not resolve to an issue or pull request" in str(e):
+            log.warning("Sync", f"[{board_id}] #{item.id} não existe no GitHub — "
+                        "removendo do snapshot (issue fantasma)")
+            snap = Snapshot(board_id).load()
+            snap.issues = [i for i in snap.issues if str(i.get("id")) != str(item.id)]
+            snap.save()
+            return
+        raise
+
+    # Remédio 2: remover bloqueios recíprocos nas issues apontadas + fullsync.
+    _cleanup_block_relations_on_delete(item.id, deleted_data, board_obj, queue)
 
     snap = Snapshot(board_id).load()
     snap.issues = [i for i in snap.issues if str(i.get("id")) != str(item.id)]
@@ -698,9 +820,12 @@ def _apply_delete_up(board_id: str, item: ChangeItem, board_obj: Board):
              issue_id=item.id)
 
 
-def _apply_delete_down(board_id: str, item: ChangeItem, board_obj: Board):
+def _apply_delete_down(board_id: str, item: ChangeItem, board_obj: Board,
+                       queue: ChangeQueue = None):
     """Remove arquivos locais (issue foi removida do board)."""
     snap = Snapshot(board_id).load()
+    # Captura as relações da issue ANTES de removê-la do snapshot (Remédio 2).
+    deleted_data = snap.issue(item.id)
 
     # Remover arquivos
     body_path = _find_issue_files(board_id, item.id)
@@ -711,6 +836,10 @@ def _apply_delete_down(board_id: str, item: ChangeItem, board_obj: Board):
             if f.exists():
                 f.unlink()
 
+    # Remédio 2: remover bloqueios recíprocos nas issues apontadas + fullsync.
+    _cleanup_block_relations_on_delete(item.id, deleted_data, board_obj, queue)
+
+    snap = Snapshot(board_id).load()
     snap.issues = [i for i in snap.issues if str(i.get("id")) != str(item.id)]
     snap.save()
 

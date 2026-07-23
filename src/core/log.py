@@ -91,14 +91,16 @@ class Log:
     def _log(self, level: str, module: str, msg: str, args: tuple, extra: dict, exc: BaseException = None):
         formatted = msg % args if args else msg
 
-        # Terminal: resumo colorido
+        now = datetime.now()
+
+        # Terminal: hora + resumo colorido
         color = _LEVEL_COLOR.get(getattr(logging, level), _BOLD)
         terminal_msg = f"[{module}] {formatted}"
         terminal_msg = _BRACKET.sub(f"{color}[\\1]{_RESET}", terminal_msg)
-        print(terminal_msg)
+        print(f"{now.strftime('%H:%M:%S')} {terminal_msg}")
 
         # Arquivo: timestamp - level - module - message + extras
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ts = now.strftime("%Y-%m-%d %H:%M:%S")
         file_line = f"{ts} - {level} - {module} - {formatted}"
         if extra:
             file_line += f" | {extra}"

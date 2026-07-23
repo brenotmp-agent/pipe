@@ -13,7 +13,7 @@ Exemplo de body completo:
     /parent #10
     /blocked_by #42, #58
     /labels backend, security
-    /effort high
+    /agent_level high
     /need_human
 
 Regras:
@@ -32,7 +32,7 @@ Comandos suportados:
 - /blocked_by #N, #M    esta issue está bloqueada por N e M
 - /blocks #N, #M        esta issue bloqueia N e M
 - /labels a, b, c       labels da issue (SET completo)
-- /effort low|medium|high
+- /agent_level low|medium|high
 - /close [completed|not_planned]
 - /archive
 - /need_human           label especial (não entra em /labels)
@@ -57,7 +57,7 @@ class IssueCommands:
     blocked_by: list[str] = field(default_factory=list)
     blocks: list[str] = field(default_factory=list)
     labels: list[str] = field(default_factory=list)
-    effort: str | None = None
+    agent_level: str | None = None
     close: str | None = None        # 'completed' | 'not_planned'
     reopen: bool = False
     archive: bool = False
@@ -67,7 +67,7 @@ class IssueCommands:
         """True se nenhum comando foi declarado."""
         return not (
             self.parent or self.children or self.blocked_by or self.blocks
-            or self.labels or self.effort or self.close or self.reopen
+            or self.labels or self.agent_level or self.close or self.reopen
             or self.archive or self.need_human
         )
 
@@ -159,8 +159,8 @@ def parse_commands(text: str) -> IssueCommands:
             cmds.blocks = _parse_refs(arg)
         elif name == "labels":
             cmds.labels = _parse_labels(arg)
-        elif name == "effort":
-            cmds.effort = arg.split()[0] if arg else None
+        elif name == "agent_level":
+            cmds.agent_level = arg.split()[0] if arg else None
         elif name == "close":
             cmds.close = arg.split()[0] if arg else "completed"
         elif name == "reopen":
@@ -211,8 +211,8 @@ def serialize_commands(cmds: IssueCommands) -> str:
         lines.append("/blocks " + ", ".join(f"#{c}" for c in cmds.blocks))
     if cmds.labels:
         lines.append("/labels " + ", ".join(cmds.labels))
-    if cmds.effort:
-        lines.append(f"/effort {cmds.effort}")
+    if cmds.agent_level:
+        lines.append(f"/agent_level {cmds.agent_level}")
     if cmds.need_human:
         lines.append("/need_human")
     if cmds.close:
@@ -260,7 +260,7 @@ Comandos disponíveis:
 - `/blocked_by #N, #M`    esta issue está bloqueada por N e M (não avança até fecharem)
 - `/blocks #N, #M`        esta issue bloqueia N e M
 - `/labels a, b, c`       define as labels da issue (substitui todas)
-- `/effort low|medium|high`  nível de dificuldade da issue (planning poker)
+- `/agent_level low|medium|high`  nível de agente para a issue (planning poker)
 - `/need_human`           marca que precisa de intervenção humana
 - `/close [completed|not_planned]`  fecha a issue
 - `/archive`              arquiva a issue no board
@@ -280,7 +280,7 @@ Exemplo de bloco no final do body:
     /parent #10
     /blocked_by #42, #58
     /labels backend, security
-    /effort high
+    /agent_level high
     /need_human
 """
 

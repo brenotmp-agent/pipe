@@ -77,8 +77,73 @@ Ao executar, o sistema cria arquivos vazios automaticamente e exige preenchiment
 
 ## Uso
 
+### Execução local (Python)
+
 ```bash
 python -m src
+```
+
+### Execução via Docker Compose (recomendado para produção)
+
+**Pré-requisitos:**
+- Docker e Docker Compose instalados
+- `gh auth login` executado no host (gera `~/.config/gh/`)
+- Chave SSH configurada no GitHub (`~/.ssh/id_ed25519`)
+- Token do GitHub com escopos `repo` e `project`
+
+**1. Preparar o contexto de build (copia o binário kiro-cli):**
+
+```bash
+./prepare-docker.sh
+```
+
+**2. Criar o arquivo `.env` com o token do GitHub:**
+
+```bash
+cp .env.example .env
+# Editar .env e preencher GH_TOKEN (e opcionalmente SSH_KEY_FILE, GH_CONFIG_DIR)
+```
+
+**3. Garantir que o `pipe.yml` existe na raiz do projeto:**
+
+```bash
+# pipe.yml não é versionado — deve ser criado/copiado manualmente
+# Ver seção "Configuração → Arquivo pipe.yml" abaixo para o formato
+```
+
+**4. Build e execução:**
+
+```bash
+docker compose build
+docker compose up
+```
+
+**5. Para rodar em background:**
+
+```bash
+docker compose up -d
+docker compose logs -f   # acompanhar logs
+```
+
+**6. Para parar:**
+
+```bash
+docker compose down
+```
+
+**Volumes persistidos entre reinícios:**
+
+| Volume | Caminho no container | Conteúdo |
+|--------|---------------------|----------|
+| `pipe_state` | `/app/.pipe` | Snapshots, fila de mudanças, índice de sessões |
+| `pipe_repos` | `/app/repo` | Clones dos repositórios git |
+| `pipe_logs` | `/app/logs` | Logs de execução |
+
+Os volumes são criados automaticamente pelo Docker na primeira execução.
+Para limpar o estado interno (forçar re-sync completo), remova os volumes:
+
+```bash
+docker compose down -v
 ```
 
 ## Estrutura
@@ -88,7 +153,8 @@ src/
 ├── core/                   # Domínio
 │   ├── log.py              # Logging dual (terminal + arquivo)
 │   ├── config.py           # Validação do pipe.yml
-│   ├── agent.py            # AgentPort + build_prompt
+│   ├── agent.py            # AgentPort + build_prompt + PROTECTED_PATHS
+│   ├── context_generator.py # Gera CONTEXT.md + agente pipe_context no startup
 │   ├── board.py            # Board core + BoardPort + ChangeItem
 │   ├── commands.py         # Comandos @--- no body (parse/serialize)
 │   ├── change_queue.py     # Fila persistente de sincronismo
@@ -102,6 +168,8 @@ src/
 
 .pipe/boards/<id>/          # Diretórios de boards e snapshots
 .pipe/sessions.json         # Índice (board/issue/agente) → session_id
+.pipe/CONTEXT.md            # Contexto do sistema gerado no startup (protegido)
+.kiro/agents/pipe_context.json  # Agente kiro-cli gerado com o contexto do sistema
 contexts/<platform>/<agent>.md  # Contextos dos agentes
 repo/                       # Repositórios clonados
 logs/                       # Logs diários (JSON) + logs de agente (MD)
@@ -113,13 +181,13 @@ pipe.yml                    # Configuração
 ```
 main()
 ├── check_config()         # Valida pipe.yml, SSH, contexts
-├── startup()              # Configura SSH, clona repos
+├── startup()              # Configura SSH, gera CONTEXT.md, clona repos
 ├── board_full_sync()      # Sync completo (estrutura + mudanças remotas)
 │
 └── while running:
     ├── board_full_sync()  # Re-executa se mudou o dia (daily full sync)
     ├── sync_board()       # Detecta mudanças remotas/locais, aplica fila → bool
-    ├── keep_task()        # Seleciona próxima tarefa elegível → task | None
+    ├── keep_task()        # Seleciona próxima tarefa → task | AUTO_ADVANCED | None
     ├── call_agent()       # Executa agente com prompt construído
     └── sleep_time()       # Intervalo entre ciclos (condicional)
 ```
@@ -136,10 +204,27 @@ Se houve qualquer atividade (sync movimentou algo OU existe tarefa para executar
 ## Seleção de Tarefas (keep_task)
 
 - Boards ordenados por prioridade (menor = mais prioritário)
-- Issues ordenadas por data (mais antiga primeiro)
-- Auto-advance de coluna `todo` para próxima coluna
+- Dentro do board, varre coluna a coluna da última para a primeira (`backlog`/`todo` por último)
+- Dentro de cada coluna, pega a issue elegível mais antiga (por data)
+- Retorno tri-estado: `task` (executa), `AUTO_ADVANCED` (avançou uma issue do `todo`; loop mantém o board e força novo sync), `None` (nada a fazer; loop avança de board)
+- Auto-advance de coluna `todo` para próxima coluna (só ocorre se nenhuma coluna posterior tiver tarefa pronta); move os arquivos, atualiza o snapshot e enfileira o `change-up` para o sync propagar ao board
 - `parallel: false` → bloqueia auto-advance se já existe issue ativa
 - Issues com `/need_human` ou `/blocked_by` no body são ignoradas
+
+### Resolução automática de bloqueios
+
+Uma issue com `/blocked_by`/`/blocks` no body não avança. Como o GitHub mantém
+a dependência mesmo com a bloqueadora fechada — e removê-la no board não altera
+o `updated_at` (logo não vira `change-down`) —, bloqueios obsoletos são limpos
+automaticamente em três situações:
+
+1. **Ao arquivar** (`/archive` no body ou coluna com `on_in:[archive]`): os
+   bloqueios da issue são removidos antes de arquivar, e cada issue vinculada
+   recebe um `change-down fullsync` para reconciliar (desbloquear).
+2. **Ao deletar** (up ou down): as issues apontadas pela deletada têm o vínculo
+   de bloqueio removido no board e recebem `change-down fullsync`.
+3. **Na inicialização**: toda mudança detectada/recuperada sobe como fullsync,
+   reconciliando as dependências.
 
 ## Execução de Agentes
 
@@ -153,14 +238,34 @@ Se houve qualquer atividade (sync movimentou algo OU existe tarefa para executar
 | `create-merge` | Cria branch + cria PR |
 | `no-branch` | Sem operações de git |
 
-### Override de model/effort
+### Substituição de agente por nível (`override-agent`)
 
-Precedência: agente (default) < coluna (`effort`) < tag `/effort` no body (se `allow-overwrite: true`)
+Cada coluna define um agente default no atributo `agent`. Se a issue tiver uma
+tag `/agent_level <nível>` no bloco `@---` e esse `<nível>` for uma chave do
+mapa `override-agent` da coluna, a esteira usa o agente indicado no valor. Se
+não houver `/agent_level`, ou o nível não estiver mapeado, usa o `agent`
+default.
+
+Como cada agente carrega o próprio `model`, trocar o agente por nível troca
+também o model efetivo da execução.
+
+```yaml
+columns:
+  desenvolvimento:
+    agent: engineering          # default
+    override-agent:
+      low: generic              # /agent_level low  -> generic
+      high: senior-engineering  # /agent_level high -> senior-engineering
+```
+
+Validação (`config.py`): `override-agent` deve ser um mapa `<nível>: <agente>`,
+a coluna precisa ter um `agent` default, e todo agente referenciado deve existir
+em `agents`.
 
 ### Log de execução
 
 Cada execução gera um arquivo em `logs/<issue_id>/<timestamp>.md` com:
-- **Parâmetros**: plataforma, agente, model, effort, board, coluna, issue
+- **Parâmetros**: plataforma, agente, model, agent_level, board, coluna, issue
 - **Prompt**: prompt completo enviado ao agente
 - **Chat**: diálogo da execução (preenchido pelo adapter)
 
@@ -178,6 +283,61 @@ tarefa retorna depois, ele retoma de onde parou em vez de recomeçar.
   índice.
 - A esteira **não** gerencia o ciclo de vida das sessões do kiro-cli — apenas
   aponta enquanto existirem. Sessão inexistente vira sessão nova sem erro.
+
+### Contexto do sistema (`CONTEXT.md` gerado no startup)
+
+No startup, a esteira gera automaticamente um contexto de sistema a partir do
+`pipe.yml` e o injeta em toda execução de agente. O objetivo é dar ao agente
+instruções explícitas derivadas da configuração real, em vez de deixá-lo
+inferir comportamento (origem do incidente "Issue Fantasma").
+
+- `generate_context(config)` (em `src/core/context_generator.py`) roda no
+  `startup()` e escreve dois arquivos:
+  - `.pipe/CONTEXT.md` — instruções em Markdown.
+  - `.kiro/agents/pipe_context.json` — arquivo de agente do kiro-cli com o
+    mesmo conteúdo.
+- O conteúdo é injetado via `--agent pipe_context` (argumento de CLI), **nunca
+  embutido inline no prompt**. O adapter usa `KIRO_HOME` apontando para o
+  `.kiro` da esteira para que o kiro-cli encontre o agente gerado.
+- **Regeneração:** recria se o arquivo não existir OU se o `pipe.yml` for mais
+  novo que o `CONTEXT.md`. Caso contrário, mantém o arquivo atual.
+
+O `CONTEXT.md` gerado contém quatro blocos derivados do `pipe.yml`:
+
+1. **Restrições de sistema** — lista de arquivos de estado interno que o agente
+   nunca deve ler ou escrever (ver "Proteção de estado interno" abaixo).
+2. **Criação de issues** — obriga o padrão `<slug>-body.md` **sem prefixo
+   numérico**. O ID real é atribuído pelo GitHub no sync; antes disso o arquivo
+   não tem (e não deve ter) prefixo numérico. Foi justamente o prefixo numérico
+   inventado pelo agente que disparou o incidente "Issue Fantasma".
+3. **Boards e colunas** — tabela de boards/colunas/agentes configurados.
+4. **Git flow e branches** — prefixos de branch por flow e branch base.
+
+> **Atenção:** o `.pipe/CONTEXT.md` gerado é diferente do `CONTEXT.md` da raiz
+> do projeto (documentação técnica escrita à mão). O arquivo gerado é protegido
+> e **não deve ser editado manualmente** — será sobrescrito no próximo restart.
+
+### Proteção de estado interno
+
+Os arquivos de estado interno da esteira (`snapshot.json`, `changeQueue.json`,
+`throttle`) são memória exclusiva do core. O agente **não pode** acessá-los. A
+proteção age em duas frentes:
+
+- **No prompt:** `src/core/agent.py` mantém a lista `PROTECTED_PATHS` e a função
+  `build_prompt` valida que nenhum desses padrões aparece no prompt enviado ao
+  agente. Se aparecer, levanta `ValueError` identificando o arquivo — o path do
+  snapshot nunca é entregue ao agente.
+- **No contexto:** o `CONTEXT.md` gerado instrui explicitamente o agente a nunca
+  ler, escrever, criar ou modificar esses arquivos.
+
+Padrões protegidos (`PROTECTED_PATHS`):
+
+| Padrão | Conteúdo |
+|--------|----------|
+| `.pipe/boards/*/snapshot.json` | Snapshot interno de cada board |
+| `.pipe/changeQueue.json` | Fila persistente de sincronismo |
+| `.pipe/throttle.json` | Estado do throttle de rate limit |
+| `.pipe/throttle-*.json` | Estado do throttle por escopo |
 
 ## Anotações no body (comandos `@---`)
 
@@ -201,7 +361,7 @@ presente garante a relação/atributo; ausente, remove. Não há comandos de
 | `/blocked_by #N, #M` | esta issue está bloqueada por N e M |
 | `/blocks #N, #M` | esta issue bloqueia N e M |
 | `/labels a, b, c` | define (SET) as labels da issue |
-| `/effort low\|medium\|high` | esforço sugerido |
+| `/agent_level low\|medium\|high` | nível de agente (chave de `override-agent`) |
 | `/need_human` | marca intervenção humana (label especial) |
 | `/close [completed\|not_planned]` | fecha a issue |
 | `/reopen` | reabre a issue |
@@ -221,7 +381,7 @@ Validar credenciais e retornar JWT.
 /parent #10
 /blocked_by #42, #58
 /labels backend, security
-/effort high
+/agent_level high
 ```
 
 ## Eventos de coluna (`on_in` / `on_out`)
@@ -288,6 +448,38 @@ detectar uma relação adicionada/removida numa issue, o sync enfileira um
 refletir o par recíproco**. Essa checagem é a condição de parada e evita
 reação em cadeia infinita.
 
+### Issues fantasmas (erro irrecuperável)
+
+Quando o sync tenta aplicar uma mudança (`change-up` ou `delete-up`) sobre uma
+issue que **não existe** no GitHub, a API responde com
+`Could not resolve to an issue or pull request`. Antes, esse erro era tratado
+como transitório e, como a fila é *at-least-once*, o evento voltava a cada
+ciclo — travando a esteira num loop (ou, na base atual, num crash-loop). Foi a
+causa central do incidente "Issue Fantasma".
+
+Agora `_apply_change_up` e `_apply_delete_up` (em `src/core/sync.py`) tratam
+esse erro específico: registram um warning
+(`removendo do snapshot (issue fantasma)`), removem a entrada correspondente do
+snapshot e **descartam** o evento em vez de re-enfileirá-lo. Qualquer outra
+exceção continua propagando normalmente.
+
+### Isolamento de IDs entre boards
+
+O espaço de números de issues do GitHub é **compartilhado** entre todos os
+boards de um mesmo repositório (epic, story, task…). Sem validação, uma
+operação destrutiva num board poderia fechar/alterar uma issue de outro board
+que coincidisse no número — foi o que fechou os épicos #1, #2, #3 no incidente.
+
+Antes de qualquer operação destrutiva (`update_issue`, `close_issue`), o adapter
+`github_board.py` valida a pertinência via `_belongs_to_board`: uma query
+GraphQL lista os `projectItems` da issue e confirma que o projeto do board alvo
+está entre eles. Se não pertencer, a operação é **abortada** com um warning
+(`não pertence a este board — operação abortada`).
+
+- **Custo:** +1 chamada GraphQL por operação destrutiva. Em um board ativo
+  (~10 closes/min) isso adiciona ~10 chamadas/min — dentro da quota padrão de
+  5000 pontos/hora do GraphQL do GitHub.
+
 ## Rate Limit (GitHub)
 
 Toda requisição respeita o throttle, inclusive dentro de loops de
@@ -309,9 +501,9 @@ custo de API) provocaria falso-positivo em toda listagem, escalando throttle e
 penalty indevidamente.
 
 ### Throttle
-- Sleep antes de cada chamada (inicia em 16s)
-- Dobra ao receber secondary rate limit (até 64s)
-- Regride após 1h sem problemas
+- Sleep antes de cada chamada (em segundos; escala `0, 1, 2, 4, ... 64`)
+- Ao receber secondary rate limit, dobra (até 64s); se estiver em `0`, sobe para `1`
+- Regride após 1h sem problemas: divide por 2; ao chegar em `1`, cai para `0` (sem espera)
 
 ### Penalty
 - Ativado quando throttle atinge 64s e ainda falha
