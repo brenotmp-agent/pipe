@@ -211,6 +211,21 @@ Se houve qualquer atividade (sync movimentou algo OU existe tarefa para executar
 - `parallel: false` → bloqueia auto-advance se já existe issue ativa
 - Issues com `/need_human` ou `/blocked_by` no body são ignoradas
 
+### Resolução automática de bloqueios
+
+Uma issue com `/blocked_by`/`/blocks` no body não avança. Como o GitHub mantém
+a dependência mesmo com a bloqueadora fechada — e removê-la no board não altera
+o `updated_at` (logo não vira `change-down`) —, bloqueios obsoletos são limpos
+automaticamente em três situações:
+
+1. **Ao arquivar** (`/archive` no body ou coluna com `on_in:[archive]`): os
+   bloqueios da issue são removidos antes de arquivar, e cada issue vinculada
+   recebe um `change-down fullsync` para reconciliar (desbloquear).
+2. **Ao deletar** (up ou down): as issues apontadas pela deletada têm o vínculo
+   de bloqueio removido no board e recebem `change-down fullsync`.
+3. **Na inicialização**: toda mudança detectada/recuperada sobe como fullsync,
+   reconciliando as dependências.
+
 ## Execução de Agentes
 
 ### gitevents (controle de branches)

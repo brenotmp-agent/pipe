@@ -109,8 +109,9 @@ Gatilhos para `change-down`:
 
 Cada `ChangeItem` tem um booleano `fullsync` (default `False`):
 - `fullsync=True` → reconcilia **todas** as propriedades + dependências
-  (blocked_by/blocks, que só existem via REST). Usado em todo create e no
-  full sync diário.
+  (blocked_by/blocks, que só existem via REST). Usado em todo create, no
+  full sync diário e na **recuperação de pendências no startup** (toda
+  mudança detectada/recuperada em `board_full_sync` sobe como fullsync).
 - `fullsync=False` → apenas a chamada única de propriedades (sem deps). Usado
   em `change-down` incremental.
 - **Upgrade (superset)**: se um item equivalente já está na fila sem fullsync
@@ -169,6 +170,30 @@ alvo já está coerente, nada é enfileirado — evitando reação em cadeia inf
 O estado desejado/real é sempre gravado no snapshot **antes** de disparar o
 gatilho. Alvos não rastreados no snapshot são ignorados.
 
+### Resolução automática de bloqueios (blocked_by/blocks)
+
+Uma issue com `/blocked_by` ou `/blocks` no body é tratada como bloqueada por
+`keep_task` (não avança). Como o GitHub **mantém a dependência mesmo com a
+issue bloqueadora fechada** e **remover a dependência não altera o
+`updated_at`** da issue (logo não é detectada como `change-down`), três
+mecanismos garantem que bloqueios obsoletos sejam limpos:
+
+1. **Ao arquivar** (`/archive` no body **ou** coluna de destino com
+   `on_in:[archive]`): antes de arquivar, `_apply_change_up` **zera**
+   `blocked_by`/`blocks` da issue. A remoção gera deltas que disparam o
+   gatilho recíproco → cada issue vinculada recebe um `change-down fullsync` e
+   reconcilia seu estado (desbloqueando-se).
+
+2. **Ao deletar** (`delete-up` **ou** `delete-down`):
+   `_cleanup_block_relations_on_delete` percorre as issues apontadas pela
+   deletada (via `blocks`/`blocked_by`), remove o vínculo recíproco no board
+   (`set_blocked_by`/`set_blocks`), atualiza o snapshot do alvo e enfileira um
+   `change-down fullsync` para ele.
+
+3. **Na inicialização**: toda mudança detectada/recuperada em
+   `board_full_sync` é `fullsync=True`, reconciliando as dependências (ver
+   flag `fullsync`).
+
 ### Throttle
 
 Toda requisição respeita o throttle. `_get_rate_limit_info` chama
@@ -216,7 +241,9 @@ Cobertura em `tests/test_rate_limit_detection.py`.
 - Auto-advance: coluna `todo` → próxima coluna; só dispara se nenhuma coluna posterior tiver tarefa elegível. Move os 3 arquivos, atualiza o snapshot (marca `status=change-up`, `body_path` na nova coluna, `column` permanece a de origem) e **enfileira o `change-up`** na ChangeQueue para o sync propagar ao board
 - `parallel: false` → bloqueia auto-advance se issue ativa fora de terminais
 - Elegível: `status == "ok"` + coluna com `agent` + coluna com `change.advance`
-- Bloqueada: `/need_human` ou `/blocked_by` no body
+- Bloqueada: `/need_human` ou `/blocked_by` no body (bloqueios obsoletos são
+  limpos automaticamente ao arquivar/deletar — ver *Resolução automática de
+  bloqueios*)
 
 ## Execução de Agentes
 

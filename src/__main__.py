@@ -128,8 +128,10 @@ def board_full_sync(config: dict):
             status = issue.get("status", "ok")
             if status != "ok":
                 from src.core.board import ChangeItem
+                # Remédio 3: na inicialização, toda mudança detectada/recuperada
+                # é reconciliada como fullsync (reconcilia também as deps).
                 item = ChangeItem.of(status, id=issue.get("id"),
-                                     board=board_id)
+                                     board=board_id, fullsync=True)
                 if queue.add(item):
                     recovered += 1
     if recovered:
