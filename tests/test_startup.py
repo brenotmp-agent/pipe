@@ -610,3 +610,104 @@ class TestSystemExitPropagation:
         assert exc_info.value.code == 1, (
             "SystemExit propagado pelo preflight deve manter código 1"
         )
+
+
+# ─── Correção: "error in libcrypto" — normalização da chave SSH ──────────────
+
+class TestSetupSSHKeyNormalization:
+    """Correção do bug 'Load key ...: error in libcrypto'.
+
+    O OpenSSH rejeita a chave privada quando o arquivo está mal formatado —
+    mesmo com material de chave válido. As duas causas cobertas aqui são:
+      1. Ausência de quebra de linha final.
+      2. Terminadores de linha CRLF (\\r\\n).
+
+    _setup_ssh() deve normalizar o conteúdo ao gravar ~/.ssh/id_pipe.
+    """
+
+    _KEY = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB\n"
+        "-----END OPENSSH PRIVATE KEY-----"
+    )
+
+    def _run_setup(self, tmp_path, monkeypatch, source_bytes: bytes) -> bytes:
+        """Executa _setup_ssh() com HOME e chave de origem isolados; devolve os
+        bytes gravados em ~/.ssh/id_pipe."""
+        home = tmp_path / "home"
+        home.mkdir()
+        source = tmp_path / "source_key"
+        source.write_bytes(source_bytes)
+
+        monkeypatch.setenv("PIPE_SSH_KEY_FILE", str(source))
+        # SSH_DIR é resolvido no import (Path.home()/".ssh"); sobrescreve direto.
+        monkeypatch.setattr(_main_module, "SSH_DIR", home / ".ssh")
+
+        _main_module._setup_ssh()
+        return (home / ".ssh" / "id_pipe").read_bytes()
+
+    def test_appends_missing_trailing_newline(self, tmp_path, monkeypatch):
+        """Chave sem quebra de linha final → arquivo gravado termina em \\n."""
+        written = self._run_setup(
+            tmp_path, monkeypatch, self._KEY.encode("utf-8")
+        )
+        assert written.endswith(b"\n"), (
+            "A chave gravada deve terminar com quebra de linha (causa do "
+            "'error in libcrypto')"
+        )
+        assert written == self._KEY.encode("utf-8") + b"\n"
+
+    def test_preserves_existing_trailing_newline(self, tmp_path, monkeypatch):
+        """Chave já com quebra final não deve ganhar linhas em branco extras."""
+        source = (self._KEY + "\n").encode("utf-8")
+        written = self._run_setup(tmp_path, monkeypatch, source)
+        assert written == source
+        assert not written.endswith(b"\n\n")
+
+    def test_converts_crlf_to_lf(self, tmp_path, monkeypatch):
+        """Terminadores CRLF devem ser convertidos para LF."""
+        source = (self._KEY + "\n").replace("\n", "\r\n").encode("utf-8")
+        written = self._run_setup(tmp_path, monkeypatch, source)
+        assert b"\r" not in written, "Não deve restar CR (\\r) na chave gravada"
+        assert written == (self._KEY + "\n").encode("utf-8")
+
+    def test_key_material_preserved(self, tmp_path, monkeypatch):
+        """O material da chave (linhas base64) não deve ser alterado."""
+        written = self._run_setup(
+            tmp_path, monkeypatch, self._KEY.encode("utf-8")
+        )
+        assert b"b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB" in written
+
+    def test_file_permissions_are_0600(self, tmp_path, monkeypatch):
+        """A chave gravada deve manter modo 0600."""
+        import stat
+        home = tmp_path / "home"
+        home.mkdir()
+        source = tmp_path / "source_key"
+        source.write_bytes(self._KEY.encode("utf-8"))
+        monkeypatch.setenv("PIPE_SSH_KEY_FILE", str(source))
+        monkeypatch.setattr(_main_module, "SSH_DIR", home / ".ssh")
+
+        _main_module._setup_ssh()
+
+        mode = stat.S_IMODE((home / ".ssh" / "id_pipe").stat().st_mode)
+        assert mode == 0o600
+
+
+class TestNormalizeKeyBytes:
+    """Testes unitários da função pura _normalize_key_bytes."""
+
+    def test_adds_trailing_newline(self):
+        assert _main_module._normalize_key_bytes(b"key") == b"key\n"
+
+    def test_idempotent_on_normalized_input(self):
+        assert _main_module._normalize_key_bytes(b"key\n") == b"key\n"
+
+    def test_crlf_becomes_lf(self):
+        assert _main_module._normalize_key_bytes(b"a\r\nb\r\n") == b"a\nb\n"
+
+    def test_lone_cr_becomes_lf(self):
+        assert _main_module._normalize_key_bytes(b"a\rb") == b"a\nb\n"
+
+    def test_empty_stays_empty(self):
+        assert _main_module._normalize_key_bytes(b"") == b""

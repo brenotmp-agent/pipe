@@ -39,11 +39,32 @@ def check_config():
         raise SystemExit(1)
 
 
+def _normalize_key_bytes(data: bytes) -> bytes:
+    """Normaliza o material da chave privada para o formato que o OpenSSH aceita.
+
+    O erro "Load key ...: error in libcrypto" ocorre quando o parser do OpenSSH
+    rejeita o arquivo da chave por questões de formatação — mesmo quando o
+    material da chave é válido. As duas causas mais comuns são:
+
+      1. Ausência de quebra de linha final após a linha "-----END ... KEY-----".
+      2. Terminadores de linha CRLF (\\r\\n) herdados de edição/transporte em
+         ambientes Windows.
+
+    Cópia byte-a-byte (read_bytes/write_bytes) preserva esses defeitos vindos da
+    origem (secret montado, copy/paste, etc.). Aqui normalizamos: removemos os
+    \\r e garantimos exatamente uma quebra de linha final.
+    """
+    normalized = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    if normalized and not normalized.endswith(b"\n"):
+        normalized += b"\n"
+    return normalized
+
+
 def _setup_ssh():
     SSH_DIR.mkdir(mode=0o700, exist_ok=True)
     key_file = SSH_DIR / "id_pipe"
     source_key = Path(os.environ[SSH_KEY_ENV]).expanduser()
-    key_file.write_bytes(source_key.read_bytes())
+    key_file.write_bytes(_normalize_key_bytes(source_key.read_bytes()))
     key_file.chmod(0o600)
     
     # Configura SSH para usar essa chave no github
